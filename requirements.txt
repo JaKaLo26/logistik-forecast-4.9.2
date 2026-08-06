@@ -1,0 +1,6 @@
+gradio>=5.0,<7
+pandas>=2.2
+requests>=2.32
+folium>=0.17
+numpy>=1.26
+python-dotenv>=1.0
