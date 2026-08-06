@@ -1,0 +1,4 @@
+auftrag,kunde,strasse,plz,ort,paletten,warengewicht_kg,service_min,zeitfenster_von,zeitfenster_bis
+A-001,Müller GmbH,Königstraße 1,70173,Stuttgart,7,2450,20,08:00,12:00
+A-002,Weber AG,Marktplatz 1,71634,Ludwigsburg,4,1200,15,09:00,14:00
+A-003,Schneider KG,Kaiserstraße 1,74072,Heilbronn,12,6800,30,10:00,16:00
