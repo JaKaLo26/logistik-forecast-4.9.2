@@ -1,39 +1,204 @@
-# Logistik Forecast 4.9.2
+---
+title: LagerForecast v4
+emoji: 🚚
+colorFrom: blue
+colorTo: green
+sdk: gradio
+sdk_version: 5.49.1
+python_version: "3.11"
+app_file: app.py
+pinned: false
+---
 
-Modulare Gradio-Demo für CSV-Import, manuelle Adressprüfung, skalierbare Fahrzeugflotte, Paletten-/Traglastverteilung, OSRM-Routing und HERE-Traffic-Debug.
+# LagerForecast v4 – Logistik Forecast 4.9.2
 
-## Schnellstart
+Modulare Python-/Gradio-Anwendung für:
 
-```bash
-python -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-cp .env.example .env
-python app.py
-```
+- CSV-Import von Aufträgen
+- automatische und manuelle Adressprüfung
+- skalierbare Fahrzeugflotte
+- Kapazitätsverteilung nach Palettenplätzen und Nutzlast
+- OSRM-Routing
+- HERE-Live-Traffic
+- Verkehrszuschläge
+- API-Debug-Ausgabe
+- Forecast je LKW
+- farblich getrennte Routen
+- Paletten- und Gewichtsanzeige je Auftrag
 
-Danach: `http://localhost:7860`
+---
 
-## CSV-Spalten
+## Projektziel
 
-`auftrag,kunde,strasse,plz,ort,paletten,warengewicht_kg,service_min,zeitfenster_von,zeitfenster_bis`
+LagerForecast v4 unterstützt die Planung von Lieferfahrten mit mehreren LKW.
 
-## Ablauf
+Vor der Forecast-Berechnung werden zuerst die verfügbaren Fahrzeuge auf die Aufträge verteilt. Dabei werden gleichzeitig berücksichtigt:
 
-1. CSV importieren.
-2. Adressen automatisch prüfen; unsichere Treffer manuell überschreiben.
-3. Fahrzeugliste beliebig erweitern oder reduzieren.
-4. Kapazität nach Palettenplätzen und Nutzlast verteilen.
-5. Forecast berechnen.
-6. Im API-Debug prüfen, welche HERE-Felder empfangen und wie sie interpretiert wurden.
+- Palettenstellplätze
+- Nutzlast
+- Auftragsgewicht
+- Anzahl der Paletten
+- Servicezeiten
 
-## Wichtige Hinweise
+Anschließend werden die Routen berechnet und aktuelle Verkehrsdaten ausgewertet.
 
-- Ohne HERE-Key wird kein echter Live-Zuschlag berechnet; die App markiert dies im Debug ausdrücklich.
-- Öffentliche OSRM- und Nominatim-Dienste sind für Entwicklung/Demos gedacht. Für Produktion sind eigener Dienst, Caching, Rate-Limits und ein korrektes Kontakt-User-Agent nötig.
-- Die Autobahn-API ist als Adapter vorbereitet. Für räumlich korrekte Meldungen müssen im nächsten Schritt Autobahnnummern aus OSRM-Schritten extrahiert und die Ereignisse gegen die Routengeometrie gematcht werden.
-- Ein 14-t- oder 40-t-Wert bezeichnet nicht automatisch die Nutzlast. Fahrzeugwerte bleiben deshalb editierbar.
+---
 
-## GitHub / Hugging Face Spaces
+## Ablauf der Anwendung
 
-Das Repository kann direkt zu GitHub gepusht werden. Für Hugging Face Spaces einen **Gradio Space** anlegen und diese Dateien in den Repository-Root kopieren. Das Secret `HERE_API_KEY` im Space hinterlegen.
+Die Oberfläche ist in drei Schritte unterteilt.
+
+### 1. CSV und Adressprüfung
+
+Aufträge werden per CSV importiert.
+
+Danach werden die Adressen automatisch geocodiert.
+
+Unsichere Adressen werden mit:
+
+`MANUELL PRÜFEN`
+
+markiert.
+
+Diese Treffer können direkt in der Tabelle manuell angepasst werden.
+
+---
+
+### 2. Flotte und Kapazitätsverteilung
+
+Standardmäßig stehen zur Verfügung:
+
+- 3 × 14-t-LKW
+- 3 × 40-t-LKW
+
+Die Fahrzeugliste ist vollständig editierbar.
+
+Fahrzeuge können:
+
+- ergänzt
+- entfernt
+- deaktiviert
+- angepasst
+
+werden.
+
+Für jedes Fahrzeug werden geprüft:
+
+- Palettenkapazität
+- Nutzlast
+- aktuelle Auslastung
+- zugewiesene Aufträge
+
+Ein Auftrag wird nur zugewiesen, wenn sowohl genügend Stellplätze als auch genügend freie Nutzlast vorhanden sind.
+
+---
+
+## Standardfahrzeuge
+
+### 14-t-LKW
+
+Standardwerte:
+
+- 18 Palettenstellplätze
+- 6.000 kg Nutzlast
+
+### 40-t-LKW
+
+Standardwerte:
+
+- 33 Palettenstellplätze
+- 24.000 kg Nutzlast
+
+Wichtig:
+
+Die Bezeichnungen 14 t und 40 t beziehen sich nicht direkt auf die Nutzlast.
+
+Die tatsächliche Nutzlast hängt vom Fahrzeug, Aufbau und Leergewicht ab.
+
+Deshalb können die Werte in der Anwendung angepasst werden.
+
+---
+
+## 3. Routing und Forecast
+
+Nach erfolgreicher Kapazitätsverteilung wird die Route für jedes Fahrzeug separat berechnet.
+
+Die Routen werden auf der Karte farblich unterschieden.
+
+Jeder LKW besitzt eine eigene Farbe.
+
+Zusätzlich wird die Route mit einer dunkleren Umrandung dargestellt, damit sich mehrere Routen besser voneinander unterscheiden lassen.
+
+---
+
+## Verkehrsdaten
+
+Aktuell können folgende Datenquellen verwendet werden:
+
+### HERE Traffic API
+
+Primäre Quelle für:
+
+- Verkehrsgeschwindigkeit
+- Verkehrsfluss
+- Stauintensität
+- Verzögerung
+- Jam Factor
+
+### Autobahn API
+
+Zusätzliche Quelle für:
+
+- Baustellen
+- Verkehrswarnungen
+- Sperrungen
+
+Die Autobahn-API ist als eigener Provider eingebunden und wird in kommenden Versionen noch genauer räumlich mit der Route abgeglichen.
+
+---
+
+## Live-Verkehrszuschlag
+
+Der Forecast berücksichtigt nicht nur die reine OSRM-Fahrzeit.
+
+Zusätzlich wird ein Verkehrszuschlag berechnet.
+
+Dieser basiert unter anderem auf:
+
+- aktueller Geschwindigkeit
+- normaler Geschwindigkeit
+- Jam Factor
+- Verkehrsbelastung
+- verfügbaren Traffic-Daten
+
+Der berechnete Zuschlag wird in Sekunden bzw. Minuten zum Forecast addiert.
+
+---
+
+## API-Debug
+
+Die Anwendung besitzt eine Debug-Ausgabe für Routing und Verkehr.
+
+Dort wird angezeigt:
+
+- welche Traffic-Quelle verwendet wurde
+- welche HERE-Werte empfangen wurden
+- Jam Factor
+- Geschwindigkeiten
+- API-Status
+- berechnete Verzögerung
+- Traffic Score
+- Datenvertrauen
+- OSRM-Distanz
+- OSRM-Fahrzeit
+
+Damit kann kontrolliert werden, ob die API-Daten korrekt interpretiert werden.
+
+---
+
+## CSV-Format
+
+Die CSV-Datei sollte folgende Spalten enthalten:
+
+```csv
+auftrag,kunde,strasse,plz,ort,paletten,warengewicht_kg,service_min,zeitfenster_von,zeitfenster_bis
