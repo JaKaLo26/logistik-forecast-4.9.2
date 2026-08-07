@@ -1,204 +1,27 @@
----
-title: LagerForecast v4
-emoji: 🚚
-colorFrom: blue
-colorTo: green
-sdk: gradio
-sdk_version: 5.49.1
-python_version: "3.11"
-app_file: app.py
-pinned: false
----
-
-# LagerForecast v4 – Logistik Forecast 4.9.2
-
-Modulare Python-/Gradio-Anwendung für:
-
-- CSV-Import von Aufträgen
-- automatische und manuelle Adressprüfung
-- skalierbare Fahrzeugflotte
-- Kapazitätsverteilung nach Palettenplätzen und Nutzlast
-- OSRM-Routing
-- HERE-Live-Traffic
-- Verkehrszuschläge
-- API-Debug-Ausgabe
-- Forecast je LKW
-- farblich getrennte Routen
-- Paletten- und Gewichtsanzeige je Auftrag
-
----
-
-## Projektziel
-
-LagerForecast v4 unterstützt die Planung von Lieferfahrten mit mehreren LKW.
-
-Vor der Forecast-Berechnung werden zuerst die verfügbaren Fahrzeuge auf die Aufträge verteilt. Dabei werden gleichzeitig berücksichtigt:
-
-- Palettenstellplätze
-- Nutzlast
-- Auftragsgewicht
-- Anzahl der Paletten
-- Servicezeiten
-
-Anschließend werden die Routen berechnet und aktuelle Verkehrsdaten ausgewertet.
-
----
-
-## Ablauf der Anwendung
-
-Die Oberfläche ist in drei Schritte unterteilt.
-
-### 1. CSV und Adressprüfung
-
-Aufträge werden per CSV importiert.
-
-Danach werden die Adressen automatisch geocodiert.
-
-Unsichere Adressen werden mit:
-
-`MANUELL PRÜFEN`
-
-markiert.
-
-Diese Treffer können direkt in der Tabelle manuell angepasst werden.
-
----
-
-### 2. Flotte und Kapazitätsverteilung
-
-Standardmäßig stehen zur Verfügung:
-
-- 3 × 14-t-LKW
-- 3 × 40-t-LKW
-
-Die Fahrzeugliste ist vollständig editierbar.
-
-Fahrzeuge können:
-
-- ergänzt
-- entfernt
-- deaktiviert
-- angepasst
-
-werden.
-
-Für jedes Fahrzeug werden geprüft:
-
-- Palettenkapazität
-- Nutzlast
-- aktuelle Auslastung
-- zugewiesene Aufträge
-
-Ein Auftrag wird nur zugewiesen, wenn sowohl genügend Stellplätze als auch genügend freie Nutzlast vorhanden sind.
-
----
-
-## Standardfahrzeuge
-
-### 14-t-LKW
-
-Standardwerte:
-
-- 18 Palettenstellplätze
-- 6.000 kg Nutzlast
-
-### 40-t-LKW
-
-Standardwerte:
-
-- 33 Palettenstellplätze
-- 24.000 kg Nutzlast
-
-Wichtig:
-
-Die Bezeichnungen 14 t und 40 t beziehen sich nicht direkt auf die Nutzlast.
-
-Die tatsächliche Nutzlast hängt vom Fahrzeug, Aufbau und Leergewicht ab.
-
-Deshalb können die Werte in der Anwendung angepasst werden.
-
----
-
-## 3. Routing und Forecast
-
-Nach erfolgreicher Kapazitätsverteilung wird die Route für jedes Fahrzeug separat berechnet.
-
-Die Routen werden auf der Karte farblich unterschieden.
-
-Jeder LKW besitzt eine eigene Farbe.
-
-Zusätzlich wird die Route mit einer dunkleren Umrandung dargestellt, damit sich mehrere Routen besser voneinander unterscheiden lassen.
-
----
-
-## Verkehrsdaten
-
-Aktuell können folgende Datenquellen verwendet werden:
-
-### HERE Traffic API
-
-Primäre Quelle für:
-
-- Verkehrsgeschwindigkeit
-- Verkehrsfluss
-- Stauintensität
-- Verzögerung
-- Jam Factor
-
-### Autobahn API
-
-Zusätzliche Quelle für:
-
-- Baustellen
-- Verkehrswarnungen
-- Sperrungen
-
-Die Autobahn-API ist als eigener Provider eingebunden und wird in kommenden Versionen noch genauer räumlich mit der Route abgeglichen.
-
----
-
-## Live-Verkehrszuschlag
-
-Der Forecast berücksichtigt nicht nur die reine OSRM-Fahrzeit.
-
-Zusätzlich wird ein Verkehrszuschlag berechnet.
-
-Dieser basiert unter anderem auf:
-
-- aktueller Geschwindigkeit
-- normaler Geschwindigkeit
-- Jam Factor
-- Verkehrsbelastung
-- verfügbaren Traffic-Daten
-
-Der berechnete Zuschlag wird in Sekunden bzw. Minuten zum Forecast addiert.
-
----
-
-## API-Debug
-
-Die Anwendung besitzt eine Debug-Ausgabe für Routing und Verkehr.
-
-Dort wird angezeigt:
-
-- welche Traffic-Quelle verwendet wurde
-- welche HERE-Werte empfangen wurden
-- Jam Factor
-- Geschwindigkeiten
-- API-Status
-- berechnete Verzögerung
-- Traffic Score
-- Datenvertrauen
-- OSRM-Distanz
-- OSRM-Fahrzeit
-
-Damit kann kontrolliert werden, ob die API-Daten korrekt interpretiert werden.
-
----
-
-## CSV-Format
-
-Die CSV-Datei sollte folgende Spalten enthalten:
-
-```csv
-auftrag,kunde,strasse,plz,ort,paletten,warengewicht_kg,service_min,zeitfenster_von,zeitfenster_bis
+title: LagerForecast 4.9.3 emoji: 🚚 colorFrom: blue colorTo: green sdk: gradio sdk_version: 5.49.1 python_version: "3.11" app_file: app.py pinned: false
+LagerForecast 4.9.3
+Version 4.9.3 setzt die neue verbindliche Prozessstruktur um:
+CSV importieren.
+Adressen automatisch prüfen.
+Nur unsichere Adressen nacheinander bestätigen.
+Depot und verfügbare Flotte festlegen.
+Aufträge geografisch clustern.
+Cluster unter Paletten- und Nutzlastgrenzen LKW zuweisen.
+Erst danach die Stopp-Reihenfolge je LKW über OSRM Trip optimieren.
+Erst die fertige Route auf Verkehr/Störungen prüfen.
+Forecast und Kartenansicht je LKW anzeigen.
+Wesentliche Änderung zu 4.9.2
+Die Auftragsverteilung arbeitet nicht mehr nach dem Prinzip „was noch hineinpasst“. Stattdessen werden räumlich nahe Stopps zu zusammenhängenden Liefergebieten gebündelt. Dadurch sollen sich Touren weniger überschneiden und jeder LKW möglichst wenig unnötige Strecke zwischen Regionen fahren.
+Clusterheuristik
+Farthest-first Seed ab Depot
+Near-neighbour Region Growing
+harte Grenzen für Palettenplätze und Nutzlast
+leichte Berücksichtigung der Zeitfenster-Mittelpunkte
+kompakte, möglichst nicht überlappende Liefergebiete
+Routenoptimierung
+Nach der Clusterbildung wird pro Fahrzeug der OSRM-Trip-Service verwendet, um die Reihenfolge der Stopps als Rundtour ab/bis Depot zu optimieren.
+Verkehr / Forecast
+Verkehr wird bewusst erst nach der Routenoptimierung ausgewertet. Die offizielle Autobahn-API ist als Adapter vorhanden. Die produktive räumliche Zuordnung von Autobahn-Ereignissen zur optimierten Route ist der nächste Entwicklungsschritt und wird nicht durch künstliche Baustellenindizes ersetzt.
+Start
+pip install -r requirements.txt
+python app.py
