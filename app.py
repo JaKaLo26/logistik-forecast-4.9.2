@@ -245,77 +245,97 @@ def geocode_orders(orders_json):
         "Tippe auf eine Zeile, um sie unten zu prüfen oder einen Vorschlag zu bestätigen.",
     )
 
-def open_address_suggestions(
-    visible_table,
-    address_state_json,
-    candidates_json,
-    evt: gr.SelectData,
-):
+def _next_manual_order(full_df: pd.DataFrame, after_order_id: str | None = None):
     """
-    HTML-Ablauf:
-    Zeile antippen -> 'Ausgewählte Zeile' -> Adressvorschläge als Auswahl.
+    Liefert den nächsten Auftrag mit Status MANUELL PRÜFEN.
+    Optional wird nach einem bereits bestätigten Auftrag weitergesucht.
     """
-    visible = pd.DataFrame(visible_table)
-    full = _read_json_records(address_state_json)
+    if full_df.empty:
+        return None
 
-    if visible.empty or full.empty:
-        raise gr.Error("Keine geprüften Adressen vorhanden.")
+    pending = full_df[full_df["status"].astype(str) == "MANUELL PRÜFEN"].copy()
+    if pending.empty:
+        return None
 
-    try:
-        row_index = evt.index[0] if isinstance(evt.index, (tuple, list)) else int(evt.index)
-    except Exception:
-        raise gr.Error("Die ausgewählte Zeile konnte nicht erkannt werden.")
+    if after_order_id:
+        all_ids = full_df["auftrag"].astype(str).tolist()
+        try:
+            start_idx = all_ids.index(str(after_order_id)) + 1
+        except ValueError:
+            start_idx = 0
 
-    if row_index < 0 or row_index >= len(visible):
-        raise gr.Error("Ungültige Zeilenauswahl.")
+        # Zuerst nach dem aktuellen Auftrag weitersuchen.
+        for idx in range(start_idx, len(full_df)):
+            row = full_df.iloc[idx]
+            if str(row.get("status", "")) == "MANUELL PRÜFEN":
+                return row
 
-    visible_row = visible.iloc[row_index]
-    order_id = str(visible_row["auftrag"])
+        # Danach von oben prüfen, falls noch offene Einträge vorliegen.
+        for idx in range(0, start_idx):
+            row = full_df.iloc[idx]
+            if str(row.get("status", "")) == "MANUELL PRÜFEN":
+                return row
 
-    full_match = full[full["auftrag"].astype(str) == order_id]
-    if full_match.empty:
-        raise gr.Error("Die ausgewählte Adresse wurde intern nicht gefunden.")
-    current = full_match.iloc[0]
+    return pending.iloc[0]
+
+
+def _selection_payload_for_order(full_df, candidates_json, order_id):
+    """
+    Baut die UI-Ausgabe für genau einen automatisch ausgewählten Prüfauftrag.
+    """
+    if full_df.empty or not order_id:
+        return (
+            "",
+            "[]",
+            "### Ausgewählte Zeile\nKeine offene Adresse.",
+            gr.update(choices=[], value=None, interactive=False),
+            "✅ Keine Adresse mehr manuell zu prüfen.",
+        )
+
+    match = full_df[full_df["auftrag"].astype(str) == str(order_id)]
+    if match.empty:
+        return (
+            "",
+            "[]",
+            "### Ausgewählte Zeile\nAuftrag nicht gefunden.",
+            gr.update(choices=[], value=None, interactive=False),
+            "",
+        )
+
+    row = match.iloc[0]
 
     try:
         all_candidates = json.loads(candidates_json or "{}")
     except Exception:
         all_candidates = {}
 
-    hits = all_candidates.get(order_id, [])
+    hits = all_candidates.get(str(order_id), [])
     choices = [str(h.get("display_name", "")).strip() for h in hits]
     choices = [c for c in choices if c]
     choices = list(dict.fromkeys(choices))
 
-    # Wenn der aktuelle Treffer vorhanden ist, oben anzeigen.
-    current_hit = str(current.get("treffer", "") or "").strip()
+    current_hit = str(row.get("treffer", "") or "").strip()
     if current_hit and current_hit not in choices:
         choices.insert(0, current_hit)
 
     selected_info = (
         f"### Ausgewählte Zeile\n"
-        f"**Auftrag:** {order_id}  \n"
-        f"**Kunde:** {current.get('kunde', '')}  \n"
-        f"**CSV-Adresse:** {current.get('eingabe', '')}  \n"
-        f"**Status:** {current.get('status', '')}"
+        f"**Auftrag:** {row.get('auftrag', '')}  \n"
+        f"**Kunde:** {row.get('kunde', '')}  \n"
+        f"**CSV-Adresse:** {row.get('eingabe', '')}"
     )
 
     if not choices:
         return (
-            order_id,
+            str(order_id),
             json.dumps(hits, ensure_ascii=False),
             selected_info,
-            gr.update(
-                choices=[],
-                value=None,
-                label="Welche Adresse ist richtig?",
-                interactive=False,
-            ),
-            "Für diese Adresse wurde kein Vorschlag gefunden.",
+            gr.update(choices=[], value=None, interactive=False),
+            "⚠️ Kein automatischer Vorschlag gefunden. Bitte Adresse in der Haupttabelle korrigieren.",
         )
 
     return (
-        order_id,
+        str(order_id),
         json.dumps(hits, ensure_ascii=False),
         selected_info,
         gr.update(
@@ -324,19 +344,43 @@ def open_address_suggestions(
             label="Welche Adresse ist richtig?",
             interactive=True,
         ),
-        "",
+        "Wähle die richtige Adresse und bestätige sie.",
     )
 
 
-def confirm_address_suggestion(
+def prepare_first_manual_address(address_state_json, candidates_json):
+    """
+    Wählt nach der automatischen Geocodierung direkt den ersten unsicheren Auftrag.
+    """
+    full = _read_json_records(address_state_json)
+    next_row = _next_manual_order(full)
+
+    if next_row is None:
+        return (
+            "",
+            "[]",
+            "### Ausgewählte Zeile\n✅ Keine Adresse muss manuell geprüft werden.",
+            gr.update(choices=[], value=None, interactive=False),
+            "✅ Adressprüfung vollständig.",
+        )
+
+    return _selection_payload_for_order(
+        full,
+        candidates_json,
+        str(next_row["auftrag"]),
+    )
+
+
+def confirm_address_suggestion_auto(
     address_state_json,
+    candidates_json,
     selected_order_id,
     selected_hits_json,
     selected_address,
 ):
     """
-    Nutzer bestätigt ausschließlich die lesbare Adresse.
-    lat/lon/provider werden anhand des gewählten Vorschlags intern übernommen.
+    Bestätigt die ausgewählte Adresse und springt anschließend automatisch
+    zum nächsten offenen MANUELL-PRÜFEN-Auftrag.
     """
     full = _read_json_records(address_state_json)
 
@@ -344,11 +388,11 @@ def confirm_address_suggestion(
         raise gr.Error("Keine geprüften Adressen vorhanden.")
 
     if not selected_order_id:
-        raise gr.Error("Bitte zuerst eine Zeile in der Adressliste antippen.")
+        raise gr.Error("Es ist kein Auftrag zur Prüfung ausgewählt.")
 
     selected_address = str(selected_address or "").strip()
     if not selected_address:
-        raise gr.Error("Bitte zuerst einen Adressvorschlag auswählen.")
+        raise gr.Error("Bitte einen Adressvorschlag auswählen.")
 
     try:
         hits = json.loads(selected_hits_json or "[]")
@@ -363,8 +407,7 @@ def confirm_address_suggestion(
         None,
     )
 
-    # Der aktuelle automatische Treffer kann schon in der Liste stehen,
-    # selbst wenn er nicht mehr in hits enthalten ist.
+    # Auch den aktuell angezeigten Treffer akzeptieren.
     if chosen is None:
         current_match = full[full["auftrag"].astype(str) == str(selected_order_id)]
         if not current_match.empty:
@@ -396,15 +439,43 @@ def confirm_address_suggestion(
     full.loc[mask, "status"] = "MANUELL BESTÄTIGT"
     full.loc[mask, "fehler"] = ""
 
+    next_row = _next_manual_order(full, after_order_id=str(selected_order_id))
+
+    if next_row is None:
+        next_order = ""
+        next_hits = "[]"
+        next_info = "### Ausgewählte Zeile\n✅ Alle unsicheren Adressen wurden bestätigt."
+        next_choice = gr.update(choices=[], value=None, interactive=False)
+        next_note = "✅ Adressprüfung abgeschlossen."
+    else:
+        (
+            next_order,
+            next_hits,
+            next_info,
+            next_choice,
+            next_note,
+        ) = _selection_payload_for_order(
+            full,
+            candidates_json,
+            str(next_row["auftrag"]),
+        )
+
+    confirmed_msg = (
+        f"✅ **Adresse bestätigt:** {chosen.get('display_name', '')}"
+    )
+
     return (
         _address_visible_df(full),
         full.to_json(orient="records", force_ascii=False),
         _address_status_text(full),
-        (
-            f"✅ **Adresse bestätigt**  \n"
-            f"Auftrag {selected_order_id}: {chosen.get('display_name', '')}"
-        ),
+        confirmed_msg,
+        next_order,
+        next_hits,
+        next_info,
+        next_choice,
+        next_note,
     )
+
 
 def geocode_depot(depot_address):
     depot_address = str(depot_address or "").strip()
@@ -756,7 +827,7 @@ with gr.Blocks(title="Logistik Forecast 4.9.2", css=CSS) as demo:
         upload,
         [orders_table, order_summary, orders_state],
     )
-    geocode_btn.click(
+    geocode_event = geocode_btn.click(
         geocode_orders,
         orders_state,
         [
@@ -767,9 +838,10 @@ with gr.Blocks(title="Logistik Forecast 4.9.2", css=CSS) as demo:
             address_note,
         ],
     )
-    address_table.select(
-        open_address_suggestions,
-        [address_table, address_state, candidates_state],
+
+    geocode_event.then(
+        prepare_first_manual_address,
+        [address_state, candidates_state],
         [
             selected_order_state,
             selected_hits_state,
@@ -778,11 +850,11 @@ with gr.Blocks(title="Logistik Forecast 4.9.2", css=CSS) as demo:
             address_choice_note,
         ],
     )
-
     confirm_suggestion_btn.click(
-        confirm_address_suggestion,
+        confirm_address_suggestion_auto,
         [
             address_state,
+            candidates_state,
             selected_order_state,
             selected_hits_state,
             address_choice,
@@ -792,8 +864,14 @@ with gr.Blocks(title="Logistik Forecast 4.9.2", css=CSS) as demo:
             address_state,
             address_status,
             suggestion_status,
+            selected_order_state,
+            selected_hits_state,
+            selected_address_info,
+            address_choice,
+            address_choice_note,
         ],
     )
+
 
     save_address_btn.click(
         save_addresses,
