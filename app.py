@@ -477,39 +477,141 @@ def confirm_address_suggestion_auto(
     )
 
 
-def geocode_depot(depot_address):
+def search_depot_address(depot_address):
+    """
+    Sucht die Depotadresse automatisch.
+    Hohe Sicherheit -> bester Treffer wird vorausgewählt.
+    Niedrige Sicherheit -> mehrere Vorschläge zur Auswahl.
+    """
     depot_address = str(depot_address or "").strip()
     if not depot_address:
         raise gr.Error("Bitte eine Depotadresse eingeben.")
 
     geocoder = Geocoder(timeout=TIMEOUT)
-    hits = geocoder.search(depot_address, limit=5)
-    if not hits:
+
+    try:
+        hits = geocoder.search(depot_address, limit=5)
+    except Exception as exc:
         raise gr.Error(
-            "Depotadresse konnte nicht gefunden werden. "
-            "Bitte Adresse genauer eingeben."
+            "Depotadresse konnte nicht geprüft werden.\n\n"
+            f"{type(exc).__name__}: {exc}"
         )
 
+    if not hits:
+        return (
+            "[]",
+            gr.update(
+                choices=[],
+                value=None,
+                interactive=False,
+                label="Gefundene Depotadresse",
+            ),
+            (
+                "⚠️ **Keine passende Depotadresse gefunden.**  \n"
+                "Bitte Straße, Hausnummer, PLZ und Ort möglichst vollständig eingeben."
+            ),
+            "",
+        )
+
+    choices = [str(h.get("display_name", "")).strip() for h in hits]
+    choices = [c for c in choices if c]
+    choices = list(dict.fromkeys(choices))
+
     best = hits[0]
+    best_address = str(best.get("display_name", "")).strip()
+    confidence = float(best.get("confidence", 0) or 0)
+
+    if confidence >= 0.72:
+        status = (
+            f"✅ **Depotvorschlag gefunden**  \n"
+            f"{best_address}  \n"
+            f"Sicherheit: {round(confidence * 100)} %  \n\n"
+            "Bitte prüfen und anschließend bestätigen."
+        )
+    else:
+        status = (
+            f"⚠️ **Depotadresse nicht eindeutig**  \n"
+            f"Bester Treffer: {best_address}  \n"
+            f"Sicherheit: {round(confidence * 100)} %  \n\n"
+            "Bitte unten den richtigen Vorschlag auswählen."
+        )
+
+    return (
+        json.dumps(hits, ensure_ascii=False),
+        gr.update(
+            choices=choices,
+            value=best_address if best_address in choices else (choices[0] if choices else None),
+            interactive=bool(choices),
+            label="Gefundene Depotadresse",
+        ),
+        status,
+        "",
+    )
+
+
+def confirm_depot_address(depot_input, depot_hits_json, selected_depot_address):
+    """
+    Bestätigt nur die lesbare Depotadresse.
+    Koordinaten werden intern in depot_state gespeichert.
+    """
+    depot_input = str(depot_input or "").strip()
+    selected_depot_address = str(selected_depot_address or "").strip()
+
+    if not depot_input:
+        raise gr.Error("Bitte zuerst eine Depotadresse eingeben.")
+
+    if not selected_depot_address:
+        raise gr.Error("Bitte zuerst einen Depotvorschlag auswählen.")
+
+    try:
+        hits = json.loads(depot_hits_json or "[]")
+    except Exception:
+        hits = []
+
+    chosen = next(
+        (
+            h for h in hits
+            if str(h.get("display_name", "")).strip() == selected_depot_address
+        ),
+        None,
+    )
+
+    if chosen is None:
+        raise gr.Error("Der ausgewählte Depotvorschlag konnte intern nicht zugeordnet werden.")
+
+    if chosen.get("lat") is None or chosen.get("lon") is None:
+        raise gr.Error("Der Depotvorschlag besitzt keine gültigen Koordinaten.")
+
     state = json.dumps(
         {
-            "address": depot_address,
-            "display_name": best["display_name"],
-            "lat": best["lat"],
-            "lon": best["lon"],
-            "confidence": best.get("confidence", 0),
-            "provider": best.get("provider", ""),
+            "address_input": depot_input,
+            "display_name": chosen.get("display_name", ""),
+            "lat": float(chosen["lat"]),
+            "lon": float(chosen["lon"]),
+            "confidence": float(chosen.get("confidence", 0) or 0),
+            "provider": chosen.get("provider", ""),
         },
         ensure_ascii=False,
     )
 
     text = (
-        f"✅ **Depot erkannt:** {best['display_name']}  \n"
-        f"Provider: {best.get('provider','')} · "
-        f"Confidence: {best.get('confidence',0)} · "
-        f"Koordinaten: {best['lat']:.6f}, {best['lon']:.6f}"
+        "✅ **Depot bestätigt**  \n"
+        f"{chosen.get('display_name', '')}"
     )
+
     return state, text
+
+
+def depot_input_changed():
+    """
+    Löscht eine alte Depotbestätigung, sobald die Eingabe geändert wird.
+    """
+    return (
+        "",
+        "[]",
+        gr.update(choices=[], value=None, interactive=False),
+        "Depotadresse geändert – bitte erneut prüfen.",
+    )
 
 
 def _forecast_markdown(df):
@@ -580,7 +682,7 @@ def calculate(assign_json, vehicle_table, depot_json):
         raise gr.Error("Bitte zuerst die Kapazität verteilen.")
 
     if not depot_json:
-        raise gr.Error("Bitte zuerst die Depotadresse prüfen.")
+        raise gr.Error("Bitte zuerst die Depotadresse automatisch prüfen und anschließend bestätigen.")
 
     try:
         depot = json.loads(depot_json)
@@ -802,11 +904,37 @@ with gr.Blocks(title="Logistik Forecast 4.9.2", css=CSS) as demo:
             )
 
             gr.Markdown("### Depot / Tourstart")
+            gr.Markdown(
+                "Depotadresse vollständig eingeben. Die App sucht automatisch passende Adressen "
+                "und zeigt nur lesbare Vorschläge."
+            )
+
+            depot_hits_state = gr.State("[]")
+
             depot_address = gr.Textbox(
                 label="Depotadresse",
                 placeholder="z. B. Mercedesstraße 1, 70372 Stuttgart",
             )
-            depot_btn = gr.Button("Depotadresse prüfen")
+
+            depot_search_btn = gr.Button(
+                "Depotadresse automatisch prüfen",
+                variant="secondary",
+            )
+
+            depot_choice = gr.Radio(
+                choices=[],
+                value=None,
+                label="Gefundene Depotadresse",
+                interactive=False,
+            )
+
+            depot_search_status = gr.Markdown()
+
+            depot_confirm_btn = gr.Button(
+                "Depotadresse bestätigen",
+                variant="primary",
+            )
+
             depot_status = gr.Markdown()
 
             forecast_btn = gr.Button("Forecast berechnen", variant="primary")
@@ -888,10 +1016,39 @@ with gr.Blocks(title="Logistik Forecast 4.9.2", css=CSS) as demo:
         [geo_state, vehicle_table],
         [assignments_table, utilization_table, assignments_state, allocation_status],
     )
-    depot_btn.click(
-        geocode_depot,
+    depot_address.change(
+        depot_input_changed,
+        None,
+        [
+            depot_state,
+            depot_hits_state,
+            depot_choice,
+            depot_status,
+        ],
+    )
+
+    depot_search_btn.click(
+        search_depot_address,
         depot_address,
-        [depot_state, depot_status],
+        [
+            depot_hits_state,
+            depot_choice,
+            depot_search_status,
+            depot_status,
+        ],
+    )
+
+    depot_confirm_btn.click(
+        confirm_depot_address,
+        [
+            depot_address,
+            depot_hits_state,
+            depot_choice,
+        ],
+        [
+            depot_state,
+            depot_status,
+        ],
     )
 
     forecast_btn.click(
