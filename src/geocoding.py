@@ -6,24 +6,22 @@ import requests
 
 
 class Geocoder:
-    def __init__(self, base_url: str | None = None, timeout: int = 20):
+    """Kostenloser Multi-Provider-Geocoder: Photon, danach Nominatim."""
+
+    def __init__(self, timeout: int = 20):
         self.timeout = timeout
         self.photon_base_url = os.getenv(
-            "PHOTON_BASE_URL",
-            "https://photon.komoot.io",
+            "PHOTON_BASE_URL", "https://photon.komoot.io"
         ).rstrip("/")
-        self.nominatim_base_url = (
-            base_url
-            or os.getenv("NOMINATIM_BASE_URL")
-            or "https://nominatim.openstreetmap.org"
+        self.nominatim_base_url = os.getenv(
+            "NOMINATIM_BASE_URL", "https://nominatim.openstreetmap.org"
         ).rstrip("/")
         self.contact_email = os.getenv(
-            "GEOCODER_CONTACT_EMAIL",
-            "lagerforecast@example.com",
+            "GEOCODER_CONTACT_EMAIL", "lagerforecast@example.com"
         )
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": f"LagerForecast/4.9.2 (contact: {self.contact_email})",
+            "User-Agent": f"LagerForecast/4.9.3 (contact: {self.contact_email})",
             "Accept": "application/json",
             "Accept-Language": "de,en;q=0.8",
         })
@@ -35,47 +33,45 @@ class Geocoder:
             return []
 
         try:
-            hits = self._search_photon(address, limit)
+            hits = self._photon(address, limit)
             if hits:
                 return hits
         except Exception:
             pass
 
         try:
-            hits = self._search_nominatim(address, limit)
-            if hits:
-                return hits
+            return self._nominatim(address, limit)
         except Exception:
-            pass
+            return []
 
-        return []
-
-    def _search_photon(self, address: str, limit: int) -> list[dict]:
+    def _photon(self, address: str, limit: int) -> list[dict]:
         r = self.session.get(
             f"{self.photon_base_url}/api/",
-            params={"q": address, "limit": min(max(int(limit),1),10), "lang": "de"},
+            params={"q": address, "limit": min(max(int(limit), 1), 10), "lang": "de"},
             timeout=self.timeout,
         )
         r.raise_for_status()
         out = []
-
         for idx, feature in enumerate(r.json().get("features", [])):
             coords = (feature.get("geometry") or {}).get("coordinates") or []
             if len(coords) < 2:
                 continue
 
-            lon, lat = coords[0], coords[1]
+            lon, lat = coords[:2]
             p = feature.get("properties") or {}
-
             countrycode = str(p.get("countrycode") or "").lower()
-            if countrycode and countrycode not in {"de","deu"}:
+            if countrycode and countrycode not in {"de", "deu"}:
                 continue
 
             street = p.get("street") or p.get("name")
             number = p.get("housenumber")
             postcode = p.get("postcode")
-            city = p.get("city") or p.get("town") or p.get("village") or p.get("municipality")
-
+            city = (
+                p.get("city")
+                or p.get("town")
+                or p.get("village")
+                or p.get("municipality")
+            )
             first = " ".join(str(x) for x in [street, number] if x)
             second = " ".join(str(x) for x in [postcode, city] if x)
             display = ", ".join(x for x in [first, second, "Deutschland"] if x)
@@ -99,7 +95,7 @@ class Geocoder:
             })
         return out
 
-    def _search_nominatim(self, address: str, limit: int) -> list[dict]:
+    def _nominatim(self, address: str, limit: int) -> list[dict]:
         elapsed = time.monotonic() - self.last_nominatim_request
         if elapsed < 1.1:
             time.sleep(1.1 - elapsed)
@@ -110,7 +106,7 @@ class Geocoder:
                 "q": address,
                 "format": "jsonv2",
                 "addressdetails": 1,
-                "limit": min(max(int(limit),1),10),
+                "limit": min(max(int(limit), 1), 10),
                 "countrycodes": "de",
                 "email": self.contact_email,
             },
@@ -123,7 +119,7 @@ class Geocoder:
         for item in r.json():
             importance = float(item.get("importance") or 0)
             out.append({
-                "display_name": item.get("display_name",""),
+                "display_name": item.get("display_name", ""),
                 "lat": float(item["lat"]),
                 "lon": float(item["lon"]),
                 "confidence": round(min(0.92, 0.45 + importance), 3),
