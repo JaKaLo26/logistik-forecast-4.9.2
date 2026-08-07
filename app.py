@@ -563,11 +563,47 @@ def calculate_forecast(routes_json):
 
 
 CSS = """
+html, body {
+  background: #0f1117 !important;
+}
+
+.gradio-container,
+.gradio-container > .main,
+.gradio-container .wrap,
+.gradio-container .contain {
+  background: #0f1117 !important;
+  color: #f3f4f6 !important;
+  min-height: 100vh;
+}
+
+.gradio-container .prose,
+.gradio-container .prose p,
+.gradio-container .prose li,
+.gradio-container .prose h1,
+.gradio-container .prose h2,
+.gradio-container .prose h3,
+.gradio-container .prose h4,
+.gradio-container label,
+.gradio-container span {
+  color: #f3f4f6;
+}
+
 .step-title{font-size:1.35rem;font-weight:750;margin-bottom:.35rem}
-.process{padding:.8rem 1rem;border:1px solid #d1d5db;border-radius:12px;margin:.3rem 0}
-#tour-map iframe{width:100%!important;min-height:560px!important;height:62vh!important;border-radius:12px}
+.process{padding:.8rem 1rem;border:1px solid #374151;border-radius:12px;margin:.3rem 0}
+
+#tour-map iframe{
+  width:100%!important;
+  min-height:560px!important;
+  height:62vh!important;
+  border-radius:12px
+}
 #tour-map{min-height:560px}
+
 @media(max-width:768px){
+  .gradio-container {
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+  }
   #tour-map iframe{min-height:500px!important;height:58vh!important}
 }
 """
