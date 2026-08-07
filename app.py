@@ -568,11 +568,12 @@ html, body {
 }
 
 .gradio-container,
-.gradio-container > .main,
-.gradio-container .wrap,
-.gradio-container .contain {
+.gradio-container > .main {
   background: #0f1117 !important;
   color: #f3f4f6 !important;
+}
+
+.gradio-container {
   min-height: 100vh;
 }
 
