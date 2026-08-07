@@ -49,4 +49,8 @@ def build_map(routes: list[dict], depot: dict | None = None, center=(51.0, 10.0)
     if bounds:
         m.fit_bounds(bounds)
 
-    return m.get_root().render()
+    # Gradio gr.HTML führt eingebettete <script>-Tags aus einem kompletten
+    # Folium-Dokument nicht zuverlässig aus. Foliums Notebook-Darstellung
+    # kapselt die Karte deshalb in einem iframe/srcdoc. Das funktioniert
+    # auch im Hugging-Face-Space und auf Mobilgeräten deutlich robuster.
+    return m._repr_html_()
