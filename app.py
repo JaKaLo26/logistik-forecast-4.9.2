@@ -204,37 +204,154 @@ def geocode_orders(orders_json):
     )
     return (
         pd.DataFrame(rows),
-        pd.DataFrame(suggestion_rows),
         json.dumps(candidates, ensure_ascii=False),
         note,
     )
 
-def apply_suggestion(address_table, suggestion_table, selected_row):
+def open_address_suggestions(address_table, candidates_json, evt: gr.SelectData):
     adr = pd.DataFrame(address_table)
-    sug = pd.DataFrame(suggestion_table)
-    if adr.empty or sug.empty:
-        raise gr.Error("Keine Adressvorschläge vorhanden.")
+    if adr.empty:
+        raise gr.Error("Keine Adressen vorhanden.")
+
+    row_index = evt.index[0] if isinstance(evt.index, (tuple, list)) else int(evt.index)
+    if row_index < 0 or row_index >= len(adr):
+        raise gr.Error("Ungültige Adresszeile.")
+
+    row = adr.iloc[row_index]
+    order_id = str(row["auftrag"])
+
     try:
-        row_idx = int(selected_row)
+        candidates = json.loads(candidates_json or "{}")
     except Exception:
-        raise gr.Error("Bitte die Zeilennummer des gewünschten Vorschlags eingeben.")
+        candidates = {}
 
-    if row_idx < 0 or row_idx >= len(sug):
-        raise gr.Error(f"Zeilennummer muss zwischen 0 und {len(sug)-1} liegen.")
+    hits = candidates.get(order_id, [])
 
-    chosen = sug.iloc[row_idx]
-    mask = adr["auftrag"].astype(str) == str(chosen["auftrag"])
+    if not hits:
+        return (
+            order_id,
+            "[]",
+            pd.DataFrame([{"Adressvorschlag": "Kein automatischer Vorschlag gefunden"}]),
+            "",
+            f"### Auftrag {order_id}\n**Eingabe:** {row['eingabe']}\n\nKein passender Vorschlag gefunden.",
+        )
+
+    display_rows = [{"Adressvorschlag": h.get("display_name", "")} for h in hits]
+
+    return (
+        order_id,
+        json.dumps(hits, ensure_ascii=False),
+        pd.DataFrame(display_rows),
+        "",
+        f"### Auftrag {order_id}\n**Eingabe:** {row['eingabe']}\n\n"
+        "Tippe auf den passenden Vorschlag und danach auf **Adresse bestätigen**.",
+    )
+
+
+def select_address_suggestion(suggestion_table, evt: gr.SelectData):
+    table = pd.DataFrame(suggestion_table)
+    if table.empty:
+        return "", "Kein Vorschlag ausgewählt."
+
+    row_index = evt.index[0] if isinstance(evt.index, (tuple, list)) else int(evt.index)
+    if row_index < 0 or row_index >= len(table):
+        return "", "Ungültige Auswahl."
+
+    address = str(table.iloc[row_index].get("Adressvorschlag", ""))
+    if not address or address == "Kein automatischer Vorschlag gefunden":
+        return "", "Kein gültiger Vorschlag ausgewählt."
+
+    return str(row_index), f"✅ Ausgewählt: **{address}**"
+
+
+def confirm_address_suggestion(address_table, selected_order_id, selected_hits_json, selected_hit_index):
+    adr = pd.DataFrame(address_table)
+
+    if not selected_order_id:
+        raise gr.Error("Bitte zuerst eine Adresszeile antippen.")
+    if selected_hit_index in (None, ""):
+        raise gr.Error("Bitte zuerst einen Adressvorschlag antippen.")
+
+    try:
+        hits = json.loads(selected_hits_json or "[]")
+        chosen = hits[int(selected_hit_index)]
+    except Exception:
+        raise gr.Error("Adressvorschlag konnte nicht übernommen werden.")
+
+    mask = adr["auftrag"].astype(str) == str(selected_order_id)
     if not mask.any():
-        raise gr.Error("Passender Auftrag wurde in der Adresstabelle nicht gefunden.")
+        raise gr.Error("Auftrag wurde nicht gefunden.")
 
-    adr.loc[mask, "treffer"] = chosen["vorschlag"]
-    adr.loc[mask, "confidence"] = chosen["confidence"]
-    adr.loc[mask, "lat"] = chosen["lat"]
-    adr.loc[mask, "lon"] = chosen["lon"]
-    adr.loc[mask, "provider"] = chosen["provider"]
+    adr.loc[mask, "treffer"] = chosen.get("display_name", "")
+    adr.loc[mask, "confidence"] = chosen.get("confidence", 0)
+    adr.loc[mask, "lat"] = chosen.get("lat")
+    adr.loc[mask, "lon"] = chosen.get("lon")
+    adr.loc[mask, "provider"] = chosen.get("provider", "")
     adr.loc[mask, "status"] = "MANUELL BESTÄTIGT"
     adr.loc[mask, "fehler"] = ""
-    return adr, f"✅ Vorschlag für Auftrag {chosen['auftrag']} übernommen."
+
+    return (
+        adr,
+        f"✅ Adresse bestätigt:\n\n**{chosen.get('display_name', '')}**",
+        "",
+    )
+
+def geocode_depot(depot_address):
+    depot_address = str(depot_address or "").strip()
+    if not depot_address:
+        raise gr.Error("Bitte eine Depotadresse eingeben.")
+
+    geocoder = Geocoder(timeout=TIMEOUT)
+    hits = geocoder.search(depot_address, limit=5)
+    if not hits:
+        raise gr.Error(
+            "Depotadresse konnte nicht gefunden werden. "
+            "Bitte Adresse genauer eingeben."
+        )
+
+    best = hits[0]
+    state = json.dumps(
+        {
+            "address": depot_address,
+            "display_name": best["display_name"],
+            "lat": best["lat"],
+            "lon": best["lon"],
+            "confidence": best.get("confidence", 0),
+            "provider": best.get("provider", ""),
+        },
+        ensure_ascii=False,
+    )
+
+    text = (
+        f"✅ **Depot erkannt:** {best['display_name']}  \n"
+        f"Provider: {best.get('provider','')} · "
+        f"Confidence: {best.get('confidence',0)} · "
+        f"Koordinaten: {best['lat']:.6f}, {best['lon']:.6f}"
+    )
+    return state, text
+
+
+def _forecast_markdown(df):
+    if df.empty:
+        return "⚠️ Keine Forecast-Ergebnisse vorhanden."
+
+    lines = ["## Forecast-Ergebnis", ""]
+    for _, r in df.iterrows():
+        lines.extend([
+            f"### 🚚 {r['vehicle_id']}",
+            f"- Distanz: **{r['distanz_km']} km**",
+            f"- Basis-Fahrzeit: **{r['basis_fahrzeit_min']} min**",
+            f"- Live-/Störungszuschlag: **{r['live_zuschlag_min']} min**",
+            f"- Servicezeit: **{r['servicezeit_min']} min**",
+            f"- Gesamtzeit: **{r['gesamtzeit_min']} min**",
+            f"- Paletten: **{r['paletten']}**",
+            f"- Gewicht: **{r['gewicht_kg']:,} kg**",
+            f"- Traffic Score: **{r['traffic_score']}**",
+            f"- Datenvertrauen: **{r['datenvertrauen_pct']} %**",
+            "",
+        ])
+    return "\n".join(lines)
+
 
 def save_addresses(address_table, orders_json):
     orders = _read_json_records(orders_json)
@@ -275,11 +392,20 @@ def distribute(orders_geo_json, vehicle_table):
     msg = "✅ Alle Aufträge zugewiesen." if not warnings else "⚠️ " + " | ".join(warnings)
     return ass, util, ass.to_json(orient="records", force_ascii=False), msg
 
-def calculate(assign_json, vehicle_table):
+def calculate(assign_json, vehicle_table, depot_json):
     ass = _read_json_records(assign_json)
     vehicles = pd.DataFrame(vehicle_table)
     if ass.empty:
         raise gr.Error("Bitte zuerst die Kapazität verteilen.")
+
+    if not depot_json:
+        raise gr.Error("Bitte zuerst die Depotadresse prüfen.")
+
+    try:
+        depot = json.loads(depot_json)
+        depot_coord = (float(depot["lat"]), float(depot["lon"]))
+    except Exception:
+        raise gr.Error("Depotdaten sind ungültig. Bitte Depot erneut prüfen.")
 
     router = OSRMRouter(
         os.getenv("OSRM_BASE_URL","https://router.project-osrm.org"),
@@ -294,9 +420,8 @@ def calculate(assign_json, vehicle_table):
             continue
         v = vmatch.iloc[0]
 
-        coords = [(float(x.lat), float(x.lon)) for _, x in group.iterrows()]
-        if len(coords) == 1:
-            coords = coords + coords
+        stop_coords = [(float(x.lat), float(x.lon)) for _, x in group.iterrows()]
+        coords = [depot_coord] + stop_coords + [depot_coord]
 
         try:
             route = router.route(coords)
@@ -361,9 +486,12 @@ def calculate(assign_json, vehicle_table):
     if not routes:
         raise gr.Error("Keine Route konnte erfolgreich berechnet werden.")
 
+    forecast_df = pd.DataFrame(summaries)
+
     return (
         build_map(routes),
-        pd.DataFrame(summaries),
+        forecast_df,
+        _forecast_markdown(forecast_df),
         json.dumps(debug, ensure_ascii=False, indent=2, default=str),
     )
 
@@ -380,6 +508,7 @@ with gr.Blocks(title="Logistik Forecast 4.9.2", css=CSS) as demo:
     geo_state = gr.State("[]")
     assignments_state = gr.State("[]")
     candidates_state = gr.State("{}")
+    depot_state = gr.State("")
 
     with gr.Tabs():
         with gr.Tab("1 · CSV & Adressen"):
@@ -397,22 +526,38 @@ with gr.Blocks(title="Logistik Forecast 4.9.2", css=CSS) as demo:
             )
             address_note = gr.Markdown()
 
-            gr.Markdown("### Adressvorschläge")
-            suggestion_table = gr.Dataframe(
-                headers=["auftrag","rang","vorschlag","confidence","lat","lon","provider"],
-                interactive=False,
-                label="Vorschläge je Auftrag",
+            gr.Markdown("### Adressvorschlag")
+            gr.Markdown(
+                "Tippe oben in der **Adressprüfung** auf eine Adresszeile. "
+                "Hier erscheinen danach nur die passenden Vorschläge."
             )
-            with gr.Row():
-                suggestion_row = gr.Number(
-                    label="Zeilennummer des Vorschlags (0 = erste Zeile)",
-                    value=0,
-                    precision=0,
-                )
-                apply_suggestion_btn = gr.Button("Vorschlag übernehmen")
+
+            selected_order_state = gr.State("")
+            selected_hits_state = gr.State("[]")
+            selected_hit_state = gr.State("")
+
+            selected_address_info = gr.Markdown("Noch keine Adresse ausgewählt.")
+
+            suggestion_table = gr.Dataframe(
+                headers=["Adressvorschlag"],
+                interactive=False,
+                label="Vorschläge für die ausgewählte Adresse",
+                wrap=True,
+            )
+
+            selected_suggestion_status = gr.Markdown()
+
+            confirm_suggestion_btn = gr.Button(
+                "Adresse bestätigen",
+                variant="primary",
+            )
+
             suggestion_status = gr.Markdown()
 
-            save_address_btn = gr.Button("Geprüfte Adressen übernehmen", variant="primary")
+            save_address_btn = gr.Button(
+                "Alle geprüften Adressen übernehmen",
+                variant="primary",
+            )
             address_saved = gr.Markdown()
 
         with gr.Tab("2 · Flotte & Kapazität"):
@@ -441,18 +586,31 @@ with gr.Blocks(title="Logistik Forecast 4.9.2", css=CSS) as demo:
         with gr.Tab("3 · Forecast & Verkehr"):
             gr.Markdown('<div class="step-title">Routen, Verkehr und API-Kontrolle</div>')
             gr.Markdown(
-                "Aktuell wird ohne kostenpflichtigen HERE-Key gearbeitet. "
-                "OSRM liefert die Route; die Autobahn-API ergänzt verfügbare offizielle Meldungen."
+                "OSRM liefert die Straßenroute. Die Autobahn-API ergänzt verfügbare "
+                "offizielle Meldungen. Ohne zusätzliche Live-Traffic-Quelle bleibt "
+                "der echte Verkehrszuschlag teilweise 0."
             )
+
+            gr.Markdown("### Depot / Tourstart")
+            depot_address = gr.Textbox(
+                label="Depotadresse",
+                placeholder="z. B. Mercedesstraße 1, 70372 Stuttgart",
+            )
+            depot_btn = gr.Button("Depotadresse prüfen")
+            depot_status = gr.Markdown()
+
             forecast_btn = gr.Button("Forecast berechnen", variant="primary")
+
+            forecast_summary_md = gr.Markdown()
+
             with gr.Row():
                 with gr.Column(scale=3):
                     map_html = gr.HTML(label="Karte")
                 with gr.Column(scale=1):
                     forecast_table = gr.Dataframe(label="Forecast je LKW")
 
-            gr.Markdown("### API-Debug – Anfrageauswertung und Feldzuordnung")
-            debug_json = gr.Code(language="json", label="Traffic-/Routing-Debug")
+            with gr.Accordion("API-Debug – technische Details", open=False):
+                debug_json = gr.Code(language="json", label="Traffic-/Routing-Debug")
 
     import_btn.click(
         read_csv,
@@ -462,13 +620,41 @@ with gr.Blocks(title="Logistik Forecast 4.9.2", css=CSS) as demo:
     geocode_btn.click(
         geocode_orders,
         orders_state,
-        [address_table, suggestion_table, candidates_state, address_note],
+        [address_table, candidates_state, address_note],
     )
-    apply_suggestion_btn.click(
-        apply_suggestion,
-        [address_table, suggestion_table, suggestion_row],
-        [address_table, suggestion_status],
+    address_table.select(
+        open_address_suggestions,
+        [address_table, candidates_state],
+        [
+            selected_order_state,
+            selected_hits_state,
+            suggestion_table,
+            selected_hit_state,
+            selected_address_info,
+        ],
     )
+
+    suggestion_table.select(
+        select_address_suggestion,
+        suggestion_table,
+        [selected_hit_state, selected_suggestion_status],
+    )
+
+    confirm_suggestion_btn.click(
+        confirm_address_suggestion,
+        [
+            address_table,
+            selected_order_state,
+            selected_hits_state,
+            selected_hit_state,
+        ],
+        [
+            address_table,
+            suggestion_status,
+            selected_hit_state,
+        ],
+    )
+
     save_address_btn.click(
         save_addresses,
         [address_table, orders_state],
@@ -484,10 +670,16 @@ with gr.Blocks(title="Logistik Forecast 4.9.2", css=CSS) as demo:
         [geo_state, vehicle_table],
         [assignments_table, utilization_table, assignments_state, allocation_status],
     )
+    depot_btn.click(
+        geocode_depot,
+        depot_address,
+        [depot_state, depot_status],
+    )
+
     forecast_btn.click(
         calculate,
-        [assignments_state, vehicle_table],
-        [map_html, forecast_table, debug_json],
+        [assignments_state, vehicle_table, depot_state],
+        [map_html, forecast_table, forecast_summary_md, debug_json],
     )
 
 if __name__ == "__main__":
