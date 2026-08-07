@@ -20,6 +20,11 @@ from src.traffic import HereTrafficProvider, AutobahnProvider, combine
 from src.maps import build_map
 from src.forecast import forecast_summary
 
+@spaces.GPU(duration=1)
+def zerogpu_startup_check():
+    """ZeroGPU-Kompatibilitätsfunktion. Wird von der Logistik-App nicht verwendet."""
+    return True
+
 load_dotenv()
 TIMEOUT=int(os.getenv('REQUEST_TIMEOUT_SECONDS','20'))
 DEFAULT_VEHICLES=[
