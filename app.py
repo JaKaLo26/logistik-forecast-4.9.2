@@ -152,148 +152,258 @@ def read_csv(file):
     except Exception as e:
         raise gr.Error(f"CSV konnte nicht importiert werden.\n\n{type(e).__name__}: {e}")
 
+def _address_visible_df(full_df: pd.DataFrame) -> pd.DataFrame:
+    """Nur die für Disposition sichtbaren Spalten – keine Koordinaten."""
+    if full_df.empty:
+        return pd.DataFrame(
+            columns=["auftrag", "kunde", "adresse", "status", "treffer", "sicherheit"]
+        )
+
+    out = pd.DataFrame({
+        "auftrag": full_df["auftrag"].astype(str),
+        "kunde": full_df["kunde"].astype(str),
+        "adresse": full_df["eingabe"].astype(str),
+        "status": full_df["status"].astype(str),
+        "treffer": full_df["treffer"].fillna("").astype(str),
+        "sicherheit": (
+            pd.to_numeric(full_df["confidence"], errors="coerce")
+            .fillna(0)
+            .mul(100)
+            .round()
+            .astype(int)
+            .astype(str)
+            + " %"
+        ),
+    })
+    return out
+
+
+def _address_status_text(full_df: pd.DataFrame) -> str:
+    total = len(full_df)
+    if total == 0:
+        return "Noch keine Adressen geprüft."
+
+    ok = int(full_df["status"].isin(["OK", "MANUELL BESTÄTIGT"]).sum())
+    manual = int((full_df["status"] == "MANUELL PRÜFEN").sum())
+    failed = int((full_df["status"] == "NICHT GEFUNDEN").sum())
+
+    return (
+        f"**{total} Adressen geprüft**  \n"
+        f"✅ {ok} bestätigt · ⚠️ {manual} manuell prüfen"
+        + (f" · ❌ {failed} ohne Treffer" if failed else "")
+    )
+
+
 def geocode_orders(orders_json):
-    df = _read_json_records(orders_json)
-    if df.empty:
+    orders = _read_json_records(orders_json)
+    if orders.empty:
         raise gr.Error("Bitte zuerst eine CSV-Datei erfolgreich importieren.")
 
     geocoder = Geocoder(timeout=TIMEOUT)
     rows = []
-    suggestion_rows = []
     candidates = {}
 
-    for _, r in df.iterrows():
+    for _, r in orders.iterrows():
         try:
             hits = geocoder.search(r["adresse"], limit=5)
-            err = ""
-        except Exception as e:
+            error_text = ""
+        except Exception as exc:
             hits = []
-            err = f"{type(e).__name__}: {e}"
+            error_text = f"{type(exc).__name__}: {exc}"
 
-        candidates[str(r["auftrag"])] = hits
+        order_id = str(r["auftrag"])
+        candidates[order_id] = hits
         best = hits[0] if hits else None
-        uncertain = not best or float(best.get("confidence", 0)) < 0.72
+
+        if best:
+            confidence = float(best.get("confidence", 0) or 0)
+            status = "OK" if confidence >= 0.72 else "MANUELL PRÜFEN"
+        else:
+            confidence = 0.0
+            status = "NICHT GEFUNDEN"
 
         rows.append({
-            "auftrag": r["auftrag"],
-            "eingabe": r["adresse"],
-            "treffer": best["display_name"] if best else "",
-            "confidence": best["confidence"] if best else 0,
-            "status": "MANUELL PRÜFEN" if uncertain else "OK",
-            "lat": best["lat"] if best else None,
-            "lon": best["lon"] if best else None,
+            "auftrag": order_id,
+            "kunde": str(r["kunde"]),
+            "eingabe": str(r["adresse"]),
+            "treffer": best.get("display_name", "") if best else "",
+            "confidence": confidence,
+            "status": status,
+            "lat": best.get("lat") if best else None,
+            "lon": best.get("lon") if best else None,
             "provider": best.get("provider", "") if best else "",
-            "fehler": err,
+            "fehler": error_text,
         })
 
-        for rank, hit in enumerate(hits, start=1):
-            suggestion_rows.append({
-                "auftrag": r["auftrag"],
-                "rang": rank,
-                "vorschlag": hit["display_name"],
-                "confidence": hit.get("confidence", 0),
-                "lat": hit["lat"],
-                "lon": hit["lon"],
-                "provider": hit.get("provider", ""),
-            })
+    full_df = pd.DataFrame(rows)
 
-    note = (
-        "Unsichere Treffer werden mit **MANUELL PRÜFEN** markiert. "
-        "Unter der Haupttabelle stehen bis zu fünf Vorschläge je Auftrag. "
-        "Kopiere bei Bedarf Vorschlag, lat und lon in die Haupttabelle."
-    )
     return (
-        pd.DataFrame(rows),
+        _address_visible_df(full_df),
+        full_df.to_json(orient="records", force_ascii=False),
         json.dumps(candidates, ensure_ascii=False),
-        note,
+        _address_status_text(full_df),
+        "Tippe auf eine Zeile, um sie unten zu prüfen oder einen Vorschlag zu bestätigen.",
     )
 
-def open_address_suggestions(address_table, candidates_json, evt: gr.SelectData):
-    adr = pd.DataFrame(address_table)
-    if adr.empty:
-        raise gr.Error("Keine Adressen vorhanden.")
+def open_address_suggestions(
+    visible_table,
+    address_state_json,
+    candidates_json,
+    evt: gr.SelectData,
+):
+    """
+    HTML-Ablauf:
+    Zeile antippen -> 'Ausgewählte Zeile' -> Adressvorschläge als Auswahl.
+    """
+    visible = pd.DataFrame(visible_table)
+    full = _read_json_records(address_state_json)
 
-    row_index = evt.index[0] if isinstance(evt.index, (tuple, list)) else int(evt.index)
-    if row_index < 0 or row_index >= len(adr):
-        raise gr.Error("Ungültige Adresszeile.")
-
-    row = adr.iloc[row_index]
-    order_id = str(row["auftrag"])
+    if visible.empty or full.empty:
+        raise gr.Error("Keine geprüften Adressen vorhanden.")
 
     try:
-        candidates = json.loads(candidates_json or "{}")
+        row_index = evt.index[0] if isinstance(evt.index, (tuple, list)) else int(evt.index)
     except Exception:
-        candidates = {}
+        raise gr.Error("Die ausgewählte Zeile konnte nicht erkannt werden.")
 
-    hits = candidates.get(order_id, [])
+    if row_index < 0 or row_index >= len(visible):
+        raise gr.Error("Ungültige Zeilenauswahl.")
 
-    if not hits:
+    visible_row = visible.iloc[row_index]
+    order_id = str(visible_row["auftrag"])
+
+    full_match = full[full["auftrag"].astype(str) == order_id]
+    if full_match.empty:
+        raise gr.Error("Die ausgewählte Adresse wurde intern nicht gefunden.")
+    current = full_match.iloc[0]
+
+    try:
+        all_candidates = json.loads(candidates_json or "{}")
+    except Exception:
+        all_candidates = {}
+
+    hits = all_candidates.get(order_id, [])
+    choices = [str(h.get("display_name", "")).strip() for h in hits]
+    choices = [c for c in choices if c]
+    choices = list(dict.fromkeys(choices))
+
+    # Wenn der aktuelle Treffer vorhanden ist, oben anzeigen.
+    current_hit = str(current.get("treffer", "") or "").strip()
+    if current_hit and current_hit not in choices:
+        choices.insert(0, current_hit)
+
+    selected_info = (
+        f"### Ausgewählte Zeile\n"
+        f"**Auftrag:** {order_id}  \n"
+        f"**Kunde:** {current.get('kunde', '')}  \n"
+        f"**CSV-Adresse:** {current.get('eingabe', '')}  \n"
+        f"**Status:** {current.get('status', '')}"
+    )
+
+    if not choices:
         return (
             order_id,
-            "[]",
-            pd.DataFrame([{"Adressvorschlag": "Kein automatischer Vorschlag gefunden"}]),
-            "",
-            f"### Auftrag {order_id}\n**Eingabe:** {row['eingabe']}\n\nKein passender Vorschlag gefunden.",
+            json.dumps(hits, ensure_ascii=False),
+            selected_info,
+            gr.update(
+                choices=[],
+                value=None,
+                label="Welche Adresse ist richtig?",
+                interactive=False,
+            ),
+            "Für diese Adresse wurde kein Vorschlag gefunden.",
         )
-
-    display_rows = [{"Adressvorschlag": h.get("display_name", "")} for h in hits]
 
     return (
         order_id,
         json.dumps(hits, ensure_ascii=False),
-        pd.DataFrame(display_rows),
+        selected_info,
+        gr.update(
+            choices=choices,
+            value=choices[0],
+            label="Welche Adresse ist richtig?",
+            interactive=True,
+        ),
         "",
-        f"### Auftrag {order_id}\n**Eingabe:** {row['eingabe']}\n\n"
-        "Tippe auf den passenden Vorschlag und danach auf **Adresse bestätigen**.",
     )
 
 
-def select_address_suggestion(suggestion_table, evt: gr.SelectData):
-    table = pd.DataFrame(suggestion_table)
-    if table.empty:
-        return "", "Kein Vorschlag ausgewählt."
+def confirm_address_suggestion(
+    address_state_json,
+    selected_order_id,
+    selected_hits_json,
+    selected_address,
+):
+    """
+    Nutzer bestätigt ausschließlich die lesbare Adresse.
+    lat/lon/provider werden anhand des gewählten Vorschlags intern übernommen.
+    """
+    full = _read_json_records(address_state_json)
 
-    row_index = evt.index[0] if isinstance(evt.index, (tuple, list)) else int(evt.index)
-    if row_index < 0 or row_index >= len(table):
-        return "", "Ungültige Auswahl."
-
-    address = str(table.iloc[row_index].get("Adressvorschlag", ""))
-    if not address or address == "Kein automatischer Vorschlag gefunden":
-        return "", "Kein gültiger Vorschlag ausgewählt."
-
-    return str(row_index), f"✅ Ausgewählt: **{address}**"
-
-
-def confirm_address_suggestion(address_table, selected_order_id, selected_hits_json, selected_hit_index):
-    adr = pd.DataFrame(address_table)
+    if full.empty:
+        raise gr.Error("Keine geprüften Adressen vorhanden.")
 
     if not selected_order_id:
-        raise gr.Error("Bitte zuerst eine Adresszeile antippen.")
-    if selected_hit_index in (None, ""):
-        raise gr.Error("Bitte zuerst einen Adressvorschlag antippen.")
+        raise gr.Error("Bitte zuerst eine Zeile in der Adressliste antippen.")
+
+    selected_address = str(selected_address or "").strip()
+    if not selected_address:
+        raise gr.Error("Bitte zuerst einen Adressvorschlag auswählen.")
 
     try:
         hits = json.loads(selected_hits_json or "[]")
-        chosen = hits[int(selected_hit_index)]
     except Exception:
-        raise gr.Error("Adressvorschlag konnte nicht übernommen werden.")
+        hits = []
 
-    mask = adr["auftrag"].astype(str) == str(selected_order_id)
+    chosen = next(
+        (
+            h for h in hits
+            if str(h.get("display_name", "")).strip() == selected_address
+        ),
+        None,
+    )
+
+    # Der aktuelle automatische Treffer kann schon in der Liste stehen,
+    # selbst wenn er nicht mehr in hits enthalten ist.
+    if chosen is None:
+        current_match = full[full["auftrag"].astype(str) == str(selected_order_id)]
+        if not current_match.empty:
+            current = current_match.iloc[0]
+            if str(current.get("treffer", "") or "").strip() == selected_address:
+                chosen = {
+                    "display_name": selected_address,
+                    "lat": current.get("lat"),
+                    "lon": current.get("lon"),
+                    "confidence": current.get("confidence", 0),
+                    "provider": current.get("provider", ""),
+                }
+
+    if chosen is None:
+        raise gr.Error("Der gewählte Adressvorschlag konnte intern nicht zugeordnet werden.")
+
+    if chosen.get("lat") is None or chosen.get("lon") is None:
+        raise gr.Error("Der gewählte Vorschlag besitzt keine gültigen Koordinaten.")
+
+    mask = full["auftrag"].astype(str) == str(selected_order_id)
     if not mask.any():
         raise gr.Error("Auftrag wurde nicht gefunden.")
 
-    adr.loc[mask, "treffer"] = chosen.get("display_name", "")
-    adr.loc[mask, "confidence"] = chosen.get("confidence", 0)
-    adr.loc[mask, "lat"] = chosen.get("lat")
-    adr.loc[mask, "lon"] = chosen.get("lon")
-    adr.loc[mask, "provider"] = chosen.get("provider", "")
-    adr.loc[mask, "status"] = "MANUELL BESTÄTIGT"
-    adr.loc[mask, "fehler"] = ""
+    full.loc[mask, "treffer"] = chosen.get("display_name", "")
+    full.loc[mask, "confidence"] = float(chosen.get("confidence", 0) or 0)
+    full.loc[mask, "lat"] = chosen.get("lat")
+    full.loc[mask, "lon"] = chosen.get("lon")
+    full.loc[mask, "provider"] = chosen.get("provider", "")
+    full.loc[mask, "status"] = "MANUELL BESTÄTIGT"
+    full.loc[mask, "fehler"] = ""
 
     return (
-        adr,
-        f"✅ Adresse bestätigt:\n\n**{chosen.get('display_name', '')}**",
-        "",
+        _address_visible_df(full),
+        full.to_json(orient="records", force_ascii=False),
+        _address_status_text(full),
+        (
+            f"✅ **Adresse bestätigt**  \n"
+            f"Auftrag {selected_order_id}: {chosen.get('display_name', '')}"
+        ),
     )
 
 def geocode_depot(depot_address):
@@ -353,9 +463,9 @@ def _forecast_markdown(df):
     return "\n".join(lines)
 
 
-def save_addresses(address_table, orders_json):
+def save_addresses(address_state_json, orders_json):
     orders = _read_json_records(orders_json)
-    adr = pd.DataFrame(address_table)
+    adr = _read_json_records(address_state_json)
     if orders.empty:
         raise gr.Error("Keine Aufträge vorhanden.")
     required_cols = ["auftrag","treffer","lat","lon"]
@@ -512,51 +622,80 @@ with gr.Blocks(title="Logistik Forecast 4.9.2", css=CSS) as demo:
 
     with gr.Tabs():
         with gr.Tab("1 · CSV & Adressen"):
-            gr.Markdown('<div class="step-title">Aufträge importieren und Adressen prüfen</div>')
-            upload = gr.File(label="CSV-Datei", file_types=[".csv"], type="filepath")
-            import_btn = gr.Button("CSV importieren", variant="primary")
-            order_summary = gr.Markdown()
-            orders_table = gr.Dataframe(interactive=True, label="Aufträge")
-
-            geocode_btn = gr.Button("Adressen automatisch prüfen")
-            address_table = gr.Dataframe(
-                headers=["auftrag","eingabe","treffer","confidence","status","lat","lon","provider","fehler"],
-                interactive=True,
-                label="Adressprüfung",
-            )
-            address_note = gr.Markdown()
-
-            gr.Markdown("### Adressvorschlag")
             gr.Markdown(
-                "Tippe oben in der **Adressprüfung** auf eine Adresszeile. "
-                "Hier erscheinen danach nur die passenden Vorschläge."
+                '<div class="step-title">CSV importieren und Adressen prüfen</div>'
             )
 
-            selected_order_state = gr.State("")
-            selected_hits_state = gr.State("[]")
-            selected_hit_state = gr.State("")
+            upload = gr.File(
+                label="Kunden-CSV auswählen",
+                file_types=[".csv"],
+                type="filepath",
+            )
+            import_btn = gr.Button(
+                "CSV importieren",
+                variant="primary",
+            )
 
-            selected_address_info = gr.Markdown("Noch keine Adresse ausgewählt.")
-
-            suggestion_table = gr.Dataframe(
-                headers=["Adressvorschlag"],
+            order_summary = gr.Markdown()
+            orders_table = gr.Dataframe(
                 interactive=False,
-                label="Vorschläge für die ausgewählte Adresse",
+                label="Importierte Aufträge",
                 wrap=True,
             )
 
-            selected_suggestion_status = gr.Markdown()
-
-            confirm_suggestion_btn = gr.Button(
-                "Adresse bestätigen",
+            geocode_btn = gr.Button(
+                "CSV importieren und Adressen prüfen",
                 variant="primary",
             )
 
+            gr.Markdown("### Prüfstatus")
+            address_status = gr.Markdown("Noch keine Adressen geprüft.")
+            address_note = gr.Markdown()
+
+            # Vollständige Geocoding-Daten bleiben unsichtbar im State.
+            address_state = gr.State("[]")
+
+            address_table = gr.Dataframe(
+                headers=[
+                    "auftrag",
+                    "kunde",
+                    "adresse",
+                    "status",
+                    "treffer",
+                    "sicherheit",
+                ],
+                interactive=False,
+                label="Adressprüfung",
+                wrap=True,
+            )
+
+            gr.Markdown("---")
+
+            selected_order_state = gr.State("")
+            selected_hits_state = gr.State("[]")
+
+            selected_address_info = gr.Markdown(
+                "### Ausgewählte Zeile\nNoch keine Zeile ausgewählt."
+            )
+
+            address_choice = gr.Radio(
+                choices=[],
+                value=None,
+                label="Welche Adresse ist richtig?",
+                interactive=False,
+            )
+
+            address_choice_note = gr.Markdown()
+
+            confirm_suggestion_btn = gr.Button(
+                "Ausgewählte Adresse bestätigen",
+                variant="primary",
+            )
             suggestion_status = gr.Markdown()
 
             save_address_btn = gr.Button(
-                "Alle geprüften Adressen übernehmen",
-                variant="primary",
+                "Adressprüfung abschließen",
+                variant="secondary",
             )
             address_saved = gr.Markdown()
 
@@ -620,44 +759,45 @@ with gr.Blocks(title="Logistik Forecast 4.9.2", css=CSS) as demo:
     geocode_btn.click(
         geocode_orders,
         orders_state,
-        [address_table, candidates_state, address_note],
+        [
+            address_table,
+            address_state,
+            candidates_state,
+            address_status,
+            address_note,
+        ],
     )
     address_table.select(
         open_address_suggestions,
-        [address_table, candidates_state],
+        [address_table, address_state, candidates_state],
         [
             selected_order_state,
             selected_hits_state,
-            suggestion_table,
-            selected_hit_state,
             selected_address_info,
+            address_choice,
+            address_choice_note,
         ],
-    )
-
-    suggestion_table.select(
-        select_address_suggestion,
-        suggestion_table,
-        [selected_hit_state, selected_suggestion_status],
     )
 
     confirm_suggestion_btn.click(
         confirm_address_suggestion,
         [
-            address_table,
+            address_state,
             selected_order_state,
             selected_hits_state,
-            selected_hit_state,
+            address_choice,
         ],
         [
             address_table,
+            address_state,
+            address_status,
             suggestion_status,
-            selected_hit_state,
         ],
     )
 
     save_address_btn.click(
         save_addresses,
-        [address_table, orders_state],
+        [address_state, orders_state],
         [geo_state, address_saved],
     )
     update_fleet_btn.click(
