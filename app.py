@@ -1,9 +1,17 @@
 from __future__ import annotations
-import json, os
+from __future__ import annotations
+
+import json
+import os
+import spaces
+
 from pathlib import Path
+
 import pandas as pd
 import gradio as gr
+
 from dotenv import load_dotenv
+
 from src.capacity import normalize_orders, summarize_orders, distribute_orders
 from src.geocoding import Geocoder
 from src.models import Vehicle
