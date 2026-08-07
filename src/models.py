@@ -1,5 +1,6 @@
 from dataclasses import dataclass, asdict
 
+
 @dataclass
 class Vehicle:
     vehicle_id: str
@@ -10,4 +11,7 @@ class Vehicle:
     available: bool = True
 
     def to_dict(self):
-        return asdict(self)
+        d = asdict(self)
+        # UI verwendet "class", damit die Tabelle kompakter bleibt.
+        d["class"] = d.pop("vehicle_class")
+        return d
