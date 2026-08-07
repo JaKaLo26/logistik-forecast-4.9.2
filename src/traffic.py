@@ -1,25 +1,9 @@
-"""
-traffic.py
-Logistik Forecast - Live Traffic Provider
-
-Primärer Provider:
-    TomTom Traffic Flow
-
-Optional ergänzend:
-    TomTom Traffic Incidents
-
-Benötigte Umgebungsvariable:
-    TOMTOM_API_KEY
-
-Installation:
-    pip install requests
-"""
+# src/traffic.py
 
 from __future__ import annotations
 
 import os
 import math
-import time
 from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -32,6 +16,8 @@ import requests
 
 TOMTOM_API_KEY = os.getenv("TOMTOM_API_KEY", "").strip()
 
+REQUEST_TIMEOUT = 10
+
 TOMTOM_FLOW_URL = (
     "https://api.tomtom.com/traffic/services/4/"
     "flowSegmentData/absolute/10/json"
@@ -42,29 +28,30 @@ TOMTOM_INCIDENT_URL = (
     "incidentDetails"
 )
 
-REQUEST_TIMEOUT = 8
-
-# Maximal so viele Flow-Punkte je Route abfragen.
-# Bei langen Touren kann später erhöht werden.
+# Nicht jeden einzelnen OSRM-Punkt abfragen.
+# 12 Punkte reichen zunächst für eine Route.
 DEFAULT_SAMPLE_POINTS = 12
-
-# Kleine Pause zwischen Requests.
-# Reduziert unnötige Request-Spitzen.
-REQUEST_PAUSE_S = 0.05
 
 
 # ============================================================
-# DATENSTRUKTUR
+# DATENMODELL
 # ============================================================
 
 @dataclass
 class TrafficResult:
     provider: str
-    delay_s: int
-    score: float
-    confidence: float
-    incidents: List[Dict[str, Any]]
-    debug: Dict[str, Any]
+    delay_s: int = 0
+    score: float = 0.0
+    confidence: float = 0.0
+    incidents: Optional[List[Dict[str, Any]]] = None
+    debug: Optional[Dict[str, Any]] = None
+
+    def __post_init__(self):
+        if self.incidents is None:
+            self.incidents = []
+
+        if self.debug is None:
+            self.debug = {}
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -73,10 +60,6 @@ class TrafficResult:
 # ============================================================
 # HILFSFUNKTIONEN
 # ============================================================
-
-def _clamp(value: float, minimum: float, maximum: float) -> float:
-    return max(minimum, min(maximum, value))
-
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
@@ -92,128 +75,183 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
-def _normalize_coordinate(
-    coordinate: Any,
-) -> Optional[Tuple[float, float]]:
+def _clamp(value: float, minimum: float, maximum: float) -> float:
+    return max(minimum, min(maximum, value))
+
+
+def _looks_like_lon_lat(a: float, b: float) -> bool:
     """
-    Gibt Koordinate als (lat, lon) zurück.
+    Hilfsheuristik.
+
+    Deutschland:
+    Longitude ungefähr 5-16
+    Latitude ungefähr 47-55
+
+    OSRM GeoJSON:
+        [lon, lat]
+    """
+
+    if -180 <= a <= 180 and -90 <= b <= 90:
+        if abs(a) <= 30 and abs(b) >= 35:
+            return True
+
+    return False
+
+
+def normalize_coordinate(point: Any) -> Optional[Tuple[float, float]]:
+    """
+    Gibt immer:
+        (lat, lon)
 
     Unterstützt:
-        (lat, lon)
-        [lat, lon]
-
+        [lon, lat]      <- OSRM
+        (lon, lat)
         {"lat": ..., "lon": ...}
         {"latitude": ..., "longitude": ...}
-
-    Falls OSRM-Koordinaten als [lon, lat] geliefert werden,
-    sollte beim Aufruf osrm_lon_lat=True verwendet werden.
     """
 
-    if isinstance(coordinate, dict):
-        lat = (
-            coordinate.get("lat")
-            if coordinate.get("lat") is not None
-            else coordinate.get("latitude")
-        )
+    if isinstance(point, dict):
 
-        lon = (
-            coordinate.get("lon")
-            if coordinate.get("lon") is not None
-            else coordinate.get("lng")
-        )
+        lat = point.get("lat")
+
+        if lat is None:
+            lat = point.get("latitude")
+
+        lon = point.get("lon")
 
         if lon is None:
-            lon = coordinate.get("longitude")
+            lon = point.get("lng")
 
-        if lat is not None and lon is not None:
-            return float(lat), float(lon)
+        if lon is None:
+            lon = point.get("longitude")
 
-    if isinstance(coordinate, (list, tuple)) and len(coordinate) >= 2:
-        return float(coordinate[0]), float(coordinate[1])
+        if lat is None or lon is None:
+            return None
 
-    return None
+        try:
+            lat = float(lat)
+            lon = float(lon)
+        except (TypeError, ValueError):
+            return None
 
+        if not (-90 <= lat <= 90):
+            return None
 
-def normalize_route_coordinates(
-    coordinates: Sequence[Any],
-    osrm_lon_lat: bool = False,
-) -> List[Tuple[float, float]]:
-    """
-    Wandelt Routenkoordinaten nach (lat, lon) um.
+        if not (-180 <= lon <= 180):
+            return None
 
-    OSRM GeoJSON liefert normalerweise:
-        [longitude, latitude]
+        return lat, lon
 
-    Dann:
-        osrm_lon_lat=True
-    """
+    if isinstance(point, (list, tuple)) and len(point) >= 2:
 
-    result: List[Tuple[float, float]] = []
+        try:
+            a = float(point[0])
+            b = float(point[1])
+        except (TypeError, ValueError):
+            return None
 
-    for item in coordinates:
-        coord = _normalize_coordinate(item)
-
-        if coord is None:
-            continue
-
-        a, b = coord
-
-        if osrm_lon_lat:
+        # OSRM GeoJSON -> [longitude, latitude]
+        if _looks_like_lon_lat(a, b):
             lon = a
             lat = b
+
         else:
             lat = a
             lon = b
 
-        if -90 <= lat <= 90 and -180 <= lon <= 180:
-            result.append((lat, lon))
+        if not (-90 <= lat <= 90):
+            return None
+
+        if not (-180 <= lon <= 180):
+            return None
+
+        return lat, lon
+
+    return None
+
+
+def normalize_route(
+    route: Any,
+) -> List[Tuple[float, float]]:
+
+    if route is None:
+        return []
+
+    # --------------------------------------------------------
+    # OSRM GeoJSON Geometry
+    # --------------------------------------------------------
+
+    if isinstance(route, dict):
+
+        if "coordinates" in route:
+            route = route["coordinates"]
+
+        elif "geometry" in route:
+
+            geometry = route["geometry"]
+
+            if isinstance(geometry, dict):
+                route = geometry.get("coordinates", [])
+
+        elif "route" in route:
+            route = route["route"]
+
+        elif "points" in route:
+            route = route["points"]
+
+    if not isinstance(route, (list, tuple)):
+        return []
+
+    result: List[Tuple[float, float]] = []
+
+    for point in route:
+
+        normalized = normalize_coordinate(point)
+
+        if normalized is not None:
+            result.append(normalized)
 
     return result
 
 
 def sample_route(
-    coordinates: Sequence[Tuple[float, float]],
+    route: Sequence[Tuple[float, float]],
     max_points: int = DEFAULT_SAMPLE_POINTS,
 ) -> List[Tuple[float, float]]:
-    """
-    Nimmt gleichmäßig verteilte Punkte der Route.
 
-    Dadurch wird nicht jeder einzelne OSRM-Geometriepunkt
-    an TomTom geschickt.
-    """
+    points = list(route)
 
-    coords = list(coordinates)
-
-    if not coords:
+    if not points:
         return []
 
-    if len(coords) <= max_points:
-        return coords
+    if len(points) <= max_points:
+        return points
 
     if max_points <= 1:
-        return [coords[len(coords) // 2]]
+        return [points[len(points) // 2]]
 
-    selected: List[Tuple[float, float]] = []
+    result = []
 
     for i in range(max_points):
-        index = round(i * (len(coords) - 1) / (max_points - 1))
-        selected.append(coords[index])
 
-    # Duplikate entfernen
-    deduplicated = []
+        index = round(
+            i * (len(points) - 1)
+            / (max_points - 1)
+        )
 
-    for point in selected:
-        if point not in deduplicated:
-            deduplicated.append(point)
+        point = points[index]
 
-    return deduplicated
+        if point not in result:
+            result.append(point)
+
+    return result
 
 
 # ============================================================
 # TOMTOM FLOW
 # ============================================================
 
-def get_tomtom_flow(
+def tomtom_flow(
     lat: float,
     lon: float,
     api_key: Optional[str] = None,
@@ -224,13 +262,14 @@ def get_tomtom_flow(
     if not key:
         raise RuntimeError(
             "TOMTOM_API_KEY fehlt. "
-            "Bitte als Umgebungsvariable/Secret hinterlegen."
+            "Bitte im Hugging-Face-Space als Secret "
+            "TOMTOM_API_KEY hinterlegen."
         )
 
     params = {
         "key": key,
         "point": f"{lat},{lon}",
-        "unit": "kmph",
+        "unit": "KMPH",
     }
 
     response = requests.get(
@@ -239,137 +278,157 @@ def get_tomtom_flow(
         timeout=REQUEST_TIMEOUT,
     )
 
+    if response.status_code == 401:
+        raise RuntimeError(
+            "TomTom: HTTP 401 - API-Key nicht akzeptiert."
+        )
+
     if response.status_code == 403:
         raise RuntimeError(
-            "TomTom antwortet mit 403. "
-            "API-Key ist ungültig oder Traffic API ist nicht freigeschaltet."
+            "TomTom: HTTP 403 - API-Key oder Traffic-API-Berechtigung prüfen."
         )
 
     if response.status_code == 429:
         raise RuntimeError(
-            "TomTom Rate Limit erreicht (HTTP 429)."
+            "TomTom: HTTP 429 - Anfrage-Limit erreicht."
         )
 
     response.raise_for_status()
 
     data = response.json()
 
-    flow = data.get("flowSegmentData", {})
+    flow = data.get("flowSegmentData") or {}
+
+    current_speed = _safe_float(
+        flow.get("currentSpeed")
+    )
+
+    free_flow_speed = _safe_float(
+        flow.get("freeFlowSpeed")
+    )
+
+    current_time = _safe_int(
+        flow.get("currentTravelTime")
+    )
+
+    free_flow_time = _safe_int(
+        flow.get("freeFlowTravelTime")
+    )
+
+    confidence = _safe_float(
+        flow.get("confidence")
+    )
+
+    road_closure = bool(
+        flow.get("roadClosure", False)
+    )
+
+    delay_s = max(
+        0,
+        current_time - free_flow_time
+    )
+
+    if road_closure:
+        score = 1.0
+
+    elif free_flow_speed > 0:
+
+        score = 1.0 - (
+            current_speed / free_flow_speed
+        )
+
+        score = _clamp(
+            score,
+            0.0,
+            1.0
+        )
+
+    else:
+        score = 0.0
 
     return {
         "lat": lat,
         "lon": lon,
 
-        "frc": flow.get("frc"),
-
         "current_speed_kmh":
-            _safe_float(flow.get("currentSpeed")),
+            current_speed,
 
         "free_flow_speed_kmh":
-            _safe_float(flow.get("freeFlowSpeed")),
+            free_flow_speed,
 
         "current_travel_time_s":
-            _safe_int(flow.get("currentTravelTime")),
+            current_time,
 
         "free_flow_travel_time_s":
-            _safe_int(flow.get("freeFlowTravelTime")),
+            free_flow_time,
+
+        "delay_s":
+            delay_s,
+
+        "score":
+            round(score, 3),
 
         "confidence":
-            _safe_float(flow.get("confidence")),
+            round(
+                _clamp(
+                    confidence,
+                    0.0,
+                    1.0
+                ),
+                3
+            ),
 
         "road_closure":
-            bool(flow.get("roadClosure", False)),
+            road_closure,
+
+        "frc":
+            flow.get("frc"),
     }
-
-
-# ============================================================
-# FLOW SCORE
-# ============================================================
-
-def calculate_flow_score(flow: Dict[str, Any]) -> float:
-    """
-    score:
-        0.0 = frei
-        1.0 = sehr dichter Verkehr / Stillstand
-
-    Grundlage:
-        currentSpeed / freeFlowSpeed
-    """
-
-    current_speed = _safe_float(
-        flow.get("current_speed_kmh")
-    )
-
-    free_speed = _safe_float(
-        flow.get("free_flow_speed_kmh")
-    )
-
-    if flow.get("road_closure"):
-        return 1.0
-
-    if free_speed <= 0:
-        return 0.0
-
-    speed_ratio = current_speed / free_speed
-
-    score = 1.0 - speed_ratio
-
-    return round(_clamp(score, 0.0, 1.0), 3)
-
-
-def calculate_delay(flow: Dict[str, Any]) -> int:
-
-    current = _safe_int(
-        flow.get("current_travel_time_s")
-    )
-
-    free = _safe_int(
-        flow.get("free_flow_travel_time_s")
-    )
-
-    return max(0, current - free)
 
 
 # ============================================================
 # TOMTOM INCIDENTS
 # ============================================================
 
-def _bbox_from_coordinates(
+def _route_bbox(
     coordinates: Sequence[Tuple[float, float]],
-    padding_deg: float = 0.01,
+    padding: float = 0.005,
 ) -> Optional[str]:
 
     if not coordinates:
         return None
 
-    lats = [x[0] for x in coordinates]
-    lons = [x[1] for x in coordinates]
+    lats = [
+        point[0]
+        for point in coordinates
+    ]
 
-    min_lat = min(lats) - padding_deg
-    max_lat = max(lats) + padding_deg
+    lons = [
+        point[1]
+        for point in coordinates
+    ]
 
-    min_lon = min(lons) - padding_deg
-    max_lon = max(lons) + padding_deg
-
-    # TomTom:
-    # minLon,minLat,maxLon,maxLat
     return (
-        f"{min_lon},{min_lat},"
-        f"{max_lon},{max_lat}"
+        f"{min(lons) - padding},"
+        f"{min(lats) - padding},"
+        f"{max(lons) + padding},"
+        f"{max(lats) + padding}"
     )
 
 
-def get_tomtom_incidents(
-    coordinates: Sequence[Tuple[float, float]],
+def tomtom_incidents(
+    route_coordinates: Sequence[Tuple[float, float]],
     api_key: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
 
     key = (api_key or TOMTOM_API_KEY).strip()
 
-    if not key or not coordinates:
+    if not key:
         return []
 
-    bbox = _bbox_from_coordinates(coordinates)
+    bbox = _route_bbox(
+        route_coordinates
+    )
 
     if not bbox:
         return []
@@ -414,41 +473,52 @@ def get_tomtom_incidents(
 
         data = response.json()
 
-    except Exception as exc:
+    except Exception:
+        return []
 
-        return [{
-            "type": "provider_error",
-            "description": str(exc),
-        }]
+    incidents = []
 
-    result: List[Dict[str, Any]] = []
+    for item in data.get("incidents", []):
 
-    for incident in data.get("incidents", []):
-
-        properties = incident.get("properties", {})
-
-        events = properties.get("events") or []
+        properties = (
+            item.get("properties")
+            or {}
+        )
 
         descriptions = []
 
-        for event in events:
-            description = event.get("description")
+        for event in (
+            properties.get("events")
+            or []
+        ):
+
+            description = event.get(
+                "description"
+            )
 
             if description:
-                descriptions.append(description)
+                descriptions.append(
+                    description
+                )
 
-        result.append({
+        incidents.append({
             "id":
                 properties.get("id"),
 
             "category":
-                properties.get("iconCategory"),
-
-            "delay_s":
-                _safe_int(properties.get("delay")),
+                properties.get(
+                    "iconCategory"
+                ),
 
             "magnitude":
-                properties.get("magnitudeOfDelay"),
+                properties.get(
+                    "magnitudeOfDelay"
+                ),
+
+            "delay_s":
+                _safe_int(
+                    properties.get("delay")
+                ),
 
             "from":
                 properties.get("from"),
@@ -460,275 +530,522 @@ def get_tomtom_incidents(
                 properties.get("length"),
 
             "roads":
-                properties.get("roadNumbers", []),
+                properties.get(
+                    "roadNumbers"
+                ) or [],
 
             "description":
-                " | ".join(descriptions),
-
-            "geometry":
-                incident.get("geometry"),
+                " | ".join(
+                    descriptions
+                ),
 
             "start_time":
-                properties.get("startTime"),
+                properties.get(
+                    "startTime"
+                ),
 
             "end_time":
-                properties.get("endTime"),
+                properties.get(
+                    "endTime"
+                ),
+
+            "geometry":
+                item.get("geometry"),
         })
 
-    return result
+    return incidents
 
 
 # ============================================================
-# ROUTEN-TRAFFIC
+# TOMTOM PROVIDER
 # ============================================================
 
-def get_tomtom_route_traffic(
-    route_coordinates: Sequence[Any],
-    api_key: Optional[str] = None,
-    max_sample_points: int = DEFAULT_SAMPLE_POINTS,
-    osrm_lon_lat: bool = True,
-    include_incidents: bool = True,
-) -> TrafficResult:
-    """
-    Hauptfunktion.
+class TomTomProvider:
 
-    Erwartet normalerweise OSRM GeoJSON Koordinaten:
+    name = "TomTom Traffic"
 
-        [
-            [longitude, latitude],
-            [longitude, latitude],
-            ...
-        ]
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        max_sample_points: int = DEFAULT_SAMPLE_POINTS,
+    ):
 
-    Deshalb ist:
-        osrm_lon_lat=True
+        self.api_key = (
+            api_key
+            or TOMTOM_API_KEY
+        ).strip()
 
-    Standard.
-    """
-
-    coords = normalize_route_coordinates(
-        route_coordinates,
-        osrm_lon_lat=osrm_lon_lat,
-    )
-
-    if not coords:
-        return TrafficResult(
-            provider="TomTom Traffic",
-            delay_s=0,
-            score=0.0,
-            confidence=0.0,
-            incidents=[],
-            debug={
-                "status": "no_route_coordinates",
-                "note":
-                    "Keine gültigen Routenkoordinaten erhalten.",
-            },
+        self.max_sample_points = (
+            max_sample_points
         )
 
-    sampled = sample_route(
-        coords,
-        max_points=max_sample_points,
-    )
+    def get_traffic(
+        self,
+        route: Any,
+        *args,
+        **kwargs,
+    ) -> TrafficResult:
 
-    flows: List[Dict[str, Any]] = []
-    errors: List[str] = []
+        coordinates = normalize_route(
+            route
+        )
 
-    for lat, lon in sampled:
+        if not coordinates:
 
-        try:
+            return TrafficResult(
+                provider=self.name,
+                delay_s=0,
+                score=0.0,
+                confidence=0.0,
+                incidents=[],
+                debug={
+                    "status":
+                        "no_route_coordinates",
 
-            flow = get_tomtom_flow(
-                lat=lat,
-                lon=lon,
-                api_key=api_key,
+                    "note":
+                        "Keine verwertbare "
+                        "OSRM-Routengeometrie erhalten."
+                }
             )
 
-            flow["score"] = calculate_flow_score(flow)
-            flow["delay_s"] = calculate_delay(flow)
+        if not self.api_key:
 
-            flows.append(flow)
+            return TrafficResult(
+                provider=self.name,
+                delay_s=0,
+                score=0.0,
+                confidence=0.0,
+                incidents=[],
+                debug={
+                    "status":
+                        "missing_api_key",
 
-        except Exception as exc:
-
-            errors.append(
-                f"{lat:.5f},{lon:.5f}: {exc}"
+                    "note":
+                        "TOMTOM_API_KEY fehlt."
+                }
             )
 
-        time.sleep(REQUEST_PAUSE_S)
+        sampled = sample_route(
+            coordinates,
+            self.max_sample_points,
+        )
 
-    if not flows:
+        samples = []
+        errors = []
+
+        for lat, lon in sampled:
+
+            try:
+
+                result = tomtom_flow(
+                    lat,
+                    lon,
+                    api_key=self.api_key,
+                )
+
+                samples.append(result)
+
+            except Exception as exc:
+
+                errors.append(
+                    str(exc)
+                )
+
+        if not samples:
+
+            return TrafficResult(
+                provider=self.name,
+                delay_s=0,
+                score=0.0,
+                confidence=0.0,
+                incidents=[],
+                debug={
+                    "status":
+                        "tomtom_failed",
+
+                    "errors":
+                        errors,
+
+                    "sample_points":
+                        len(sampled),
+                }
+            )
+
+        # ----------------------------------------------------
+        # Durchschnittlicher Traffic Score
+        # ----------------------------------------------------
+
+        scores = [
+            _safe_float(
+                sample.get("score")
+            )
+            for sample in samples
+        ]
+
+        confidences = [
+            _safe_float(
+                sample.get("confidence")
+            )
+            for sample in samples
+        ]
+
+        delay_values = [
+            _safe_int(
+                sample.get("delay_s")
+            )
+            for sample in samples
+        ]
+
+        score = (
+            sum(scores)
+            / len(scores)
+            if scores
+            else 0.0
+        )
+
+        confidence = (
+            sum(confidences)
+            / len(confidences)
+            if confidences
+            else 0.0
+        )
+
+        # Die Segmentzeiten werden nicht als komplette
+        # Routendauer interpretiert.
+        # Sie dienen als Live-Verkehrsindikator.
+        delay_s = sum(
+            delay_values
+        )
+
+        closures = sum(
+            1
+            for sample in samples
+            if sample.get(
+                "road_closure"
+            )
+        )
+
+        incidents = tomtom_incidents(
+            coordinates,
+            api_key=self.api_key,
+        )
 
         return TrafficResult(
-            provider="TomTom Traffic",
-            delay_s=0,
-            score=0.0,
-            confidence=0.0,
-            incidents=[],
+            provider=self.name,
+
+            delay_s=int(delay_s),
+
+            score=round(
+                _clamp(
+                    score,
+                    0.0,
+                    1.0
+                ),
+                3
+            ),
+
+            confidence=round(
+                _clamp(
+                    confidence,
+                    0.0,
+                    1.0
+                ),
+                3
+            ),
+
+            incidents=incidents,
+
             debug={
-                "status": "provider_failed",
+                "status":
+                    "ok",
+
+                "route_points":
+                    len(coordinates),
+
                 "sample_points":
                     len(sampled),
 
+                "successful_samples":
+                    len(samples),
+
+                "failed_samples":
+                    len(errors),
+
+                "road_closures":
+                    closures,
+
+                "flow_samples":
+                    samples,
+
                 "errors":
                     errors,
-            },
+            }
         )
 
     # --------------------------------------------------------
-    # Aggregation
+    # Mehrere Methodennamen zur Kompatibilität
     # --------------------------------------------------------
 
-    scores = [
-        _safe_float(x.get("score"))
-        for x in flows
-    ]
+    def fetch(
+        self,
+        route: Any,
+        *args,
+        **kwargs,
+    ) -> TrafficResult:
 
-    confidences = [
-        _safe_float(x.get("confidence"))
-        for x in flows
-    ]
+        return self.get_traffic(
+            route,
+            *args,
+            **kwargs,
+        )
 
-    delays = [
-        _safe_int(x.get("delay_s"))
-        for x in flows
-    ]
+    def calculate(
+        self,
+        route: Any,
+        *args,
+        **kwargs,
+    ) -> TrafficResult:
 
-    closures = [
-        x
-        for x in flows
-        if x.get("road_closure")
-    ]
+        return self.get_traffic(
+            route,
+            *args,
+            **kwargs,
+        )
 
-    average_score = (
-        sum(scores) / len(scores)
-        if scores
-        else 0.0
-    )
+    def __call__(
+        self,
+        route: Any,
+        *args,
+        **kwargs,
+    ) -> TrafficResult:
 
-    average_confidence = (
-        sum(confidences) / len(confidences)
-        if confidences
-        else 0.0
-    )
+        return self.get_traffic(
+            route,
+            *args,
+            **kwargs,
+        )
 
-    # Wichtig:
-    # Die abgefragten Flow-Segmente können unterschiedlich lang sein.
-    # Deshalb addieren wir nicht einfach alle TravelTimes.
-    #
-    # Für den Forecast verwenden wir hier den mittleren relativen
-    # Verkehrsverlust und liefern zusätzlich die Einzelwerte.
-    #
-    # delay_s dient hier als indikative Summe der beobachteten
-    # Segmentverzögerungen.
 
-    total_delay_s = sum(delays)
+# ============================================================
+# ABWÄRTSKOMPATIBILITÄT
+# ============================================================
 
-    incidents: List[Dict[str, Any]] = []
+class AutobahnProvider(TomTomProvider):
+    """
+    WICHTIG:
 
-    if include_incidents:
+    Der Name bleibt erhalten, weil app.py aktuell noch:
 
-        try:
+        from src.traffic import AutobahnProvider
 
-            incidents = get_tomtom_incidents(
-                coords,
-                api_key=api_key,
+    importiert.
+
+    Intern läuft die Klasse aber jetzt über TomTom.
+
+    Dadurch muss app.py zunächst nicht umgeschrieben werden.
+    """
+
+    name = "TomTom Traffic"
+
+
+# ============================================================
+# PROVIDER KOMBINIEREN
+# ============================================================
+
+def combine(
+    *results,
+    **kwargs,
+) -> TrafficResult:
+    """
+    Kompatible Aggregationsfunktion.
+
+    Akzeptiert:
+        TrafficResult
+        dict
+        Listen davon
+
+    Dadurch soll bestehender Code, der combine(...)
+    verwendet, weiter funktionieren.
+    """
+
+    flattened = []
+
+    for result in results:
+
+        if result is None:
+            continue
+
+        if isinstance(
+            result,
+            (list, tuple)
+        ):
+            flattened.extend(result)
+
+        else:
+            flattened.append(result)
+
+    normalized = []
+
+    for result in flattened:
+
+        if isinstance(
+            result,
+            TrafficResult
+        ):
+            normalized.append(result)
+
+        elif isinstance(
+            result,
+            dict
+        ):
+
+            normalized.append(
+                TrafficResult(
+                    provider=str(
+                        result.get(
+                            "provider",
+                            "Traffic Provider"
+                        )
+                    ),
+
+                    delay_s=_safe_int(
+                        result.get(
+                            "delay_s"
+                        )
+                    ),
+
+                    score=_safe_float(
+                        result.get(
+                            "score"
+                        )
+                    ),
+
+                    confidence=_safe_float(
+                        result.get(
+                            "confidence"
+                        )
+                    ),
+
+                    incidents=result.get(
+                        "incidents"
+                    ) or [],
+
+                    debug=result.get(
+                        "debug"
+                    ) or {},
+                )
             )
 
-        except Exception as exc:
+    if not normalized:
 
-            errors.append(
-                f"Incident API: {exc}"
-            )
+        return TrafficResult(
+            provider="Traffic",
+            delay_s=0,
+            score=0.0,
+            confidence=0.0,
+            incidents=[],
+            debug={
+                "status":
+                    "no_provider_results"
+            }
+        )
 
-    # Incident Delay zusätzlich erfassen,
-    # aber nicht blind doppelt in Flow-Delay addieren.
+    # --------------------------------------------------------
+    # Confidence-gewichteter Score
+    # --------------------------------------------------------
 
-    incident_delay_s = sum(
-        _safe_int(x.get("delay_s"))
-        for x in incidents
-        if isinstance(x, dict)
+    confidence_sum = sum(
+        max(
+            result.confidence,
+            0.01
+        )
+        for result in normalized
     )
+
+    weighted_score = sum(
+        result.score
+        * max(
+            result.confidence,
+            0.01
+        )
+        for result in normalized
+    )
+
+    score = (
+        weighted_score
+        / confidence_sum
+    )
+
+    confidence = sum(
+        result.confidence
+        for result in normalized
+    ) / len(normalized)
+
+    delay_s = max(
+        result.delay_s
+        for result in normalized
+    )
+
+    incidents = []
+
+    for result in normalized:
+        incidents.extend(
+            result.incidents
+            or []
+        )
 
     return TrafficResult(
-        provider="TomTom Traffic",
+        provider="Combined Traffic",
 
-        delay_s=int(total_delay_s),
+        delay_s=int(
+            delay_s
+        ),
 
         score=round(
             _clamp(
-                average_score,
+                score,
                 0.0,
-                1.0,
+                1.0
             ),
-            3,
+            3
         ),
 
         confidence=round(
             _clamp(
-                average_confidence,
+                confidence,
                 0.0,
-                1.0,
+                1.0
             ),
-            3,
+            3
         ),
 
         incidents=incidents,
 
         debug={
-            "status": "ok",
+            "status":
+                "ok",
 
-            "provider":
-                "TomTom Traffic API",
-
-            "route_points":
-                len(coords),
-
-            "sample_points_requested":
-                len(sampled),
-
-            "sample_points_successful":
-                len(flows),
-
-            "sample_points_failed":
-                len(errors),
-
-            "road_closures":
-                len(closures),
-
-            "flow_delay_s":
-                total_delay_s,
-
-            "incident_delay_s":
-                incident_delay_s,
-
-            "flow_samples":
-                flows,
-
-            "errors":
-                errors,
-        },
+            "provider_results": [
+                result.to_dict()
+                for result
+                in normalized
+            ]
+        }
     )
 
 
 # ============================================================
-# KOMPATIBILITÄTSFUNKTION
+# EINFACHER WRAPPER
 # ============================================================
 
 def calculate_live_traffic(
-    route_coordinates: Sequence[Any],
-    api_key: Optional[str] = None,
+    route: Any,
 ) -> Dict[str, Any]:
-    """
-    Einfache Wrapper-Funktion für bestehende Forecast-Logik.
 
-    Rückgabe ähnlich deiner bisherigen Struktur.
-    """
+    provider = TomTomProvider()
 
-    result = get_tomtom_route_traffic(
-        route_coordinates=route_coordinates,
-        api_key=api_key,
-        osrm_lon_lat=True,
-        include_incidents=True,
+    result = provider.get_traffic(
+        route
     )
 
     return {
@@ -741,6 +1058,9 @@ def calculate_live_traffic(
         "confidence":
             result.confidence,
 
+        "incidents":
+            result.incidents,
+
         "provider_results": [
             result.to_dict()
         ],
@@ -748,32 +1068,20 @@ def calculate_live_traffic(
 
 
 # ============================================================
-# TEST
+# API-KEY TEST
 # ============================================================
 
-if __name__ == "__main__":
+def tomtom_status() -> Dict[str, Any]:
 
-    # Stuttgart Beispielroute
-    # OSRM-Reihenfolge:
-    # [longitude, latitude]
+    return {
+        "provider":
+            "TomTom Traffic",
 
-    test_route = [
-        [9.1829, 48.7758],
-        [9.1900, 48.7800],
-        [9.2050, 48.7900],
-        [9.2200, 48.8000],
-    ]
+        "api_key_configured":
+            bool(TOMTOM_API_KEY),
 
-    traffic = calculate_live_traffic(
-        test_route
-    )
-
-    import json
-
-    print(
-        json.dumps(
-            traffic,
-            indent=2,
-            ensure_ascii=False,
-        )
-    )
+        "api_key_length":
+            len(TOMTOM_API_KEY)
+            if TOMTOM_API_KEY
+            else 0,
+    }
