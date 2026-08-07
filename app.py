@@ -9,7 +9,8 @@ import pandas as pd
 import spaces
 from dotenv import load_dotenv
 
-from src.capacity import normalize_orders, summarize_orders, distribute_orders
+from src.capacity import normalize_orders, summarize_orders
+from src.clustering import cluster_orders
 from src.geocoding import Geocoder
 from src.models import Vehicle
 from src.routing import OSRMRouter
@@ -20,36 +21,31 @@ from src.forecast import forecast_summary
 
 @spaces.GPU(duration=1)
 def zerogpu_startup_check():
-    """ZeroGPU-Kompatibilitätsfunktion. Wird von der Logistik-App nicht verwendet."""
+    """ZeroGPU-Kompatibilitätsfunktion; die Logistikberechnung läuft auf CPU."""
     return True
 
 
 load_dotenv()
 TIMEOUT = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "20"))
 
-SMALL_TEMPLATE = {
-    "class": "14 t",
-    "pallet_capacity": 18,
-    "payload_kg": 6000,
-}
-LARGE_TEMPLATE = {
-    "class": "40 t",
-    "pallet_capacity": 33,
-    "payload_kg": 24000,
-}
 COLORS = [
     "#2563eb", "#7c3aed", "#0891b2", "#dc2626", "#ea580c",
     "#16a34a", "#9333ea", "#0f766e", "#be123c", "#a16207",
     "#1d4ed8", "#15803d", "#b91c1c", "#6d28d9", "#0369a1",
 ]
 
-def _read_json_records(payload: str) -> pd.DataFrame:
-    if not payload or payload.strip() in ("", "[]", "null"):
+SMALL = {"class": "14 t", "pallet_capacity": 18, "payload_kg": 6000}
+LARGE = {"class": "40 t", "pallet_capacity": 33, "payload_kg": 24000}
+
+
+def _read_json(payload: str) -> pd.DataFrame:
+    if not payload or str(payload).strip() in {"", "[]", "null"}:
         return pd.DataFrame()
     return pd.read_json(StringIO(payload), orient="records")
 
-def _normalize_column_name(name: str) -> str:
-    value = str(name).strip().lower().replace(" ", "_").replace("-", "_")
+
+def _normalize_column_name(name):
+    v = str(name).strip().lower().replace(" ", "_").replace("-", "_")
     aliases = {
         "kundenname": "kunde",
         "straße": "strasse",
@@ -67,44 +63,46 @@ def _normalize_column_name(name: str) -> str:
         "postleitzahl": "plz",
         "stadt": "ort",
     }
-    return aliases.get(value, value)
+    return aliases.get(v, v)
 
-def _make_vehicle_rows(n_small: int, n_large: int) -> pd.DataFrame:
+
+def make_fleet(n_small=3, n_large=3):
     rows = []
-    idx = 0
+    color_idx = 0
     for i in range(1, int(n_small) + 1):
         rows.append({
             "vehicle_id": f"LKW-K{i:02d}",
-            "class": SMALL_TEMPLATE["class"],
-            "pallet_capacity": SMALL_TEMPLATE["pallet_capacity"],
-            "payload_kg": SMALL_TEMPLATE["payload_kg"],
-            "color": COLORS[idx % len(COLORS)],
+            **SMALL,
+            "color": COLORS[color_idx % len(COLORS)],
             "available": True,
         })
-        idx += 1
+        color_idx += 1
     for i in range(1, int(n_large) + 1):
         rows.append({
             "vehicle_id": f"LKW-G{i:02d}",
-            "class": LARGE_TEMPLATE["class"],
-            "pallet_capacity": LARGE_TEMPLATE["pallet_capacity"],
-            "payload_kg": LARGE_TEMPLATE["payload_kg"],
-            "color": COLORS[idx % len(COLORS)],
+            **LARGE,
+            "color": COLORS[color_idx % len(COLORS)],
             "available": True,
         })
-        idx += 1
+        color_idx += 1
     return pd.DataFrame(rows)
 
+
 def update_fleet(n_small, n_large):
-    n_small = max(0, int(n_small or 0))
-    n_large = max(0, int(n_large or 0))
-    df = _make_vehicle_rows(n_small, n_large)
-    total_p = int(df["pallet_capacity"].sum()) if not df.empty else 0
-    total_w = int(df["payload_kg"].sum()) if not df.empty else 0
-    return df, f"**Flotte: {len(df)} Fahrzeuge · {total_p} Palettenplätze · {total_w:,} kg Nutzlast**"
+    df = make_fleet(max(0, int(n_small or 0)), max(0, int(n_large or 0)))
+    if df.empty:
+        return df, "⚠️ Keine Fahrzeuge konfiguriert."
+    return (
+        df,
+        f"**{len(df)} Fahrzeuge · {int(df.pallet_capacity.sum())} Palettenplätze · "
+        f"{int(df.payload_kg.sum()):,} kg Nutzlast**",
+    )
+
 
 def read_csv(file):
     if not file:
-        raise gr.Error("Bitte zuerst eine CSV-Datei auswählen.")
+        raise gr.Error("Bitte CSV auswählen.")
+
     try:
         try:
             df = pd.read_csv(file, sep=None, engine="python", encoding="utf-8-sig")
@@ -112,954 +110,663 @@ def read_csv(file):
             df = pd.read_csv(file, sep=None, engine="python", encoding="cp1252")
 
         if df.empty:
-            raise gr.Error("Die CSV-Datei ist leer.")
+            raise gr.Error("CSV ist leer.")
 
         df.columns = [_normalize_column_name(c) for c in df.columns]
-        required = ["auftrag","kunde","strasse","plz","ort","paletten","warengewicht_kg","service_min"]
-        missing = [c for c in required if c not in df.columns]
-        if missing:
-            raise gr.Error(
-                "CSV-Struktur nicht erkannt.\n\nFehlende Spalten:\n"
-                + ", ".join(missing)
-                + "\n\nErkannte Spalten:\n"
-                + ", ".join(df.columns)
-            )
-
-        for col in ["paletten","warengewicht_kg","service_min"]:
-            cleaned = (
-                df[col].astype(str).str.strip()
-                .str.replace(".", "", regex=False)
-                .str.replace(",", ".", regex=False)
-            )
-            df[col] = pd.to_numeric(cleaned, errors="raise")
-
-        df["auftrag"] = df["auftrag"].astype(str).str.strip()
-        df["kunde"] = df["kunde"].astype(str).str.strip()
-        df["strasse"] = df["strasse"].astype(str).str.strip()
-        df["plz"] = df["plz"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
-        df["ort"] = df["ort"].astype(str).str.strip()
-
         df = normalize_orders(df)
         s = summarize_orders(df)
 
         return (
             df,
-            f"✅ **{s['auftraege']} Aufträge · {s['paletten']} Paletten · {s['gewicht_kg']:,} kg · Ø {s['durchschnitt_kg_pro_palette']} kg/Palette**",
+            f"✅ **{s['auftraege']} Aufträge · {s['paletten']} Paletten · "
+            f"{s['gewicht_kg']:,} kg**",
             df.to_json(orient="records", force_ascii=False),
         )
     except gr.Error:
         raise
-    except Exception as e:
-        raise gr.Error(f"CSV konnte nicht importiert werden.\n\n{type(e).__name__}: {e}")
-
-def _address_visible_df(full_df: pd.DataFrame) -> pd.DataFrame:
-    """Nur die für Disposition sichtbaren Spalten – keine Koordinaten."""
-    if full_df.empty:
-        return pd.DataFrame(
-            columns=["auftrag", "kunde", "adresse", "status", "treffer", "sicherheit"]
-        )
-
-    out = pd.DataFrame({
-        "auftrag": full_df["auftrag"].astype(str),
-        "kunde": full_df["kunde"].astype(str),
-        "adresse": full_df["eingabe"].astype(str),
-        "status": full_df["status"].astype(str),
-        "treffer": full_df["treffer"].fillna("").astype(str),
-        "sicherheit": (
-            pd.to_numeric(full_df["confidence"], errors="coerce")
-            .fillna(0)
-            .mul(100)
-            .round()
-            .astype(int)
-            .astype(str)
-            + " %"
-        ),
-    })
-    return out
+    except Exception as exc:
+        raise gr.Error(f"CSV konnte nicht importiert werden: {type(exc).__name__}: {exc}")
 
 
-def _address_status_text(full_df: pd.DataFrame) -> str:
-    total = len(full_df)
-    if total == 0:
-        return "Noch keine Adressen geprüft."
-
-    ok = int(full_df["status"].isin(["OK", "MANUELL BESTÄTIGT"]).sum())
-    manual = int((full_df["status"] == "MANUELL PRÜFEN").sum())
-    failed = int((full_df["status"] == "NICHT GEFUNDEN").sum())
-
-    return (
-        f"**{total} Adressen geprüft**  \n"
-        f"✅ {ok} bestätigt · ⚠️ {manual} manuell prüfen"
-        + (f" · ❌ {failed} ohne Treffer" if failed else "")
-    )
-
-
-def geocode_orders(orders_json):
-    orders = _read_json_records(orders_json)
+def geocode_all(orders_json):
+    orders = _read_json(orders_json)
     if orders.empty:
-        raise gr.Error("Bitte zuerst eine CSV-Datei erfolgreich importieren.")
+        raise gr.Error("Bitte zuerst CSV importieren.")
 
-    geocoder = Geocoder(timeout=TIMEOUT)
-    rows = []
+    geocoder = Geocoder(TIMEOUT)
+    full_rows = []
     candidates = {}
 
-    for _, r in orders.iterrows():
-        try:
-            hits = geocoder.search(r["adresse"], limit=5)
-            error_text = ""
-        except Exception as exc:
-            hits = []
-            error_text = f"{type(exc).__name__}: {exc}"
-
-        order_id = str(r["auftrag"])
-        candidates[order_id] = hits
+    for _, row in orders.iterrows():
+        hits = geocoder.search(row["adresse"], 5)
+        oid = str(row["auftrag"])
+        candidates[oid] = hits
         best = hits[0] if hits else None
 
         if best:
-            confidence = float(best.get("confidence", 0) or 0)
+            confidence = float(best.get("confidence", 0))
             status = "OK" if confidence >= 0.72 else "MANUELL PRÜFEN"
         else:
             confidence = 0.0
-            status = "NICHT GEFUNDEN"
+            status = "MANUELL PRÜFEN"
 
-        rows.append({
-            "auftrag": order_id,
-            "kunde": str(r["kunde"]),
-            "eingabe": str(r["adresse"]),
+        full_rows.append({
+            "auftrag": oid,
+            "kunde": str(row["kunde"]),
+            "eingabe": str(row["adresse"]),
             "treffer": best.get("display_name", "") if best else "",
             "confidence": confidence,
             "status": status,
             "lat": best.get("lat") if best else None,
             "lon": best.get("lon") if best else None,
             "provider": best.get("provider", "") if best else "",
-            "fehler": error_text,
         })
 
-    full_df = pd.DataFrame(rows)
-
+    full = pd.DataFrame(full_rows)
+    visible = address_visible(full)
+    status = address_status(full)
     return (
-        _address_visible_df(full_df),
-        full_df.to_json(orient="records", force_ascii=False),
+        visible,
+        full.to_json(orient="records", force_ascii=False),
         json.dumps(candidates, ensure_ascii=False),
-        _address_status_text(full_df),
-        "Tippe auf eine Zeile, um sie unten zu prüfen oder einen Vorschlag zu bestätigen.",
+        status,
     )
 
-def _next_manual_order(full_df: pd.DataFrame, after_order_id: str | None = None):
-    """
-    Liefert den nächsten Auftrag mit Status MANUELL PRÜFEN.
-    Optional wird nach einem bereits bestätigten Auftrag weitergesucht.
-    """
-    if full_df.empty:
-        return None
 
-    pending = full_df[full_df["status"].astype(str) == "MANUELL PRÜFEN"].copy()
-    if pending.empty:
-        return None
-
-    if after_order_id:
-        all_ids = full_df["auftrag"].astype(str).tolist()
-        try:
-            start_idx = all_ids.index(str(after_order_id)) + 1
-        except ValueError:
-            start_idx = 0
-
-        # Zuerst nach dem aktuellen Auftrag weitersuchen.
-        for idx in range(start_idx, len(full_df)):
-            row = full_df.iloc[idx]
-            if str(row.get("status", "")) == "MANUELL PRÜFEN":
-                return row
-
-        # Danach von oben prüfen, falls noch offene Einträge vorliegen.
-        for idx in range(0, start_idx):
-            row = full_df.iloc[idx]
-            if str(row.get("status", "")) == "MANUELL PRÜFEN":
-                return row
-
-    return pending.iloc[0]
+def address_visible(full):
+    if full.empty:
+        return pd.DataFrame()
+    return pd.DataFrame({
+        "auftrag": full["auftrag"].astype(str),
+        "kunde": full["kunde"].astype(str),
+        "adresse": full["eingabe"].astype(str),
+        "status": full["status"].astype(str),
+        "treffer": full["treffer"].fillna("").astype(str),
+        "sicherheit": (
+            pd.to_numeric(full["confidence"], errors="coerce")
+            .fillna(0).mul(100).round().astype(int).astype(str) + " %"
+        ),
+    })
 
 
-def _selection_payload_for_order(full_df, candidates_json, order_id):
-    """
-    Baut die UI-Ausgabe für genau einen automatisch ausgewählten Prüfauftrag.
-    """
-    if full_df.empty or not order_id:
+def address_status(full):
+    if full.empty:
+        return "Noch keine Adressen geprüft."
+    open_count = int((full["status"] == "MANUELL PRÜFEN").sum())
+    confirmed = len(full) - open_count
+    return (
+        f"**{len(full)} Adressen geprüft · ✅ {confirmed} automatisch/bestätigt · "
+        f"⚠️ {open_count} offen**"
+    )
+
+
+def _next_open(full):
+    p = full[full["status"].astype(str) == "MANUELL PRÜFEN"]
+    return None if p.empty else p.iloc[0]
+
+
+def prepare_review(address_state_json, candidates_json):
+    full = _read_json(address_state_json)
+    row = _next_open(full)
+    if row is None:
         return (
             "",
             "[]",
-            "### Ausgewählte Zeile\nKeine offene Adresse.",
+            "✅ Alle Adressen sind eindeutig.",
             gr.update(choices=[], value=None, interactive=False),
-            "✅ Keine Adresse mehr manuell zu prüfen.",
         )
 
-    match = full_df[full_df["auftrag"].astype(str) == str(order_id)]
-    if match.empty:
-        return (
-            "",
-            "[]",
-            "### Ausgewählte Zeile\nAuftrag nicht gefunden.",
-            gr.update(choices=[], value=None, interactive=False),
-            "",
-        )
-
-    row = match.iloc[0]
-
-    try:
-        all_candidates = json.loads(candidates_json or "{}")
-    except Exception:
-        all_candidates = {}
-
-    hits = all_candidates.get(str(order_id), [])
-    choices = [str(h.get("display_name", "")).strip() for h in hits]
-    choices = [c for c in choices if c]
-    choices = list(dict.fromkeys(choices))
-
-    current_hit = str(row.get("treffer", "") or "").strip()
-    if current_hit and current_hit not in choices:
-        choices.insert(0, current_hit)
-
-    selected_info = (
-        f"### Ausgewählte Zeile\n"
-        f"**Auftrag:** {row.get('auftrag', '')}  \n"
-        f"**Kunde:** {row.get('kunde', '')}  \n"
-        f"**CSV-Adresse:** {row.get('eingabe', '')}"
-    )
-
-    if not choices:
-        return (
-            str(order_id),
-            json.dumps(hits, ensure_ascii=False),
-            selected_info,
-            gr.update(choices=[], value=None, interactive=False),
-            "⚠️ Kein automatischer Vorschlag gefunden. Bitte Adresse in der Haupttabelle korrigieren.",
-        )
+    oid = str(row["auftrag"])
+    candidates = json.loads(candidates_json or "{}")
+    hits = candidates.get(oid, [])
+    choices = [h.get("display_name", "") for h in hits if h.get("display_name")]
+    current = str(row.get("treffer", "") or "")
+    if current and current not in choices:
+        choices.insert(0, current)
 
     return (
-        str(order_id),
+        oid,
         json.dumps(hits, ensure_ascii=False),
-        selected_info,
+        f"### Jetzt prüfen\n**{row['kunde']}**  \n{row['eingabe']}",
         gr.update(
             choices=choices,
-            value=choices[0],
-            label="Welche Adresse ist richtig?",
-            interactive=True,
+            value=choices[0] if choices else None,
+            interactive=bool(choices),
         ),
-        "Wähle die richtige Adresse und bestätige sie.",
     )
 
 
-def prepare_first_manual_address(address_state_json, candidates_json):
-    """
-    Wählt nach der automatischen Geocodierung direkt den ersten unsicheren Auftrag.
-    """
-    full = _read_json_records(address_state_json)
-    next_row = _next_manual_order(full)
+def confirm_review(address_state_json, candidates_json, oid, hits_json, selected):
+    full = _read_json(address_state_json)
+    if not oid:
+        raise gr.Error("Keine offene Adresse ausgewählt.")
+    if not selected:
+        raise gr.Error("Bitte Adresse auswählen.")
 
-    if next_row is None:
-        return (
-            "",
-            "[]",
-            "### Ausgewählte Zeile\n✅ Keine Adresse muss manuell geprüft werden.",
-            gr.update(choices=[], value=None, interactive=False),
-            "✅ Adressprüfung vollständig.",
-        )
-
-    return _selection_payload_for_order(
-        full,
-        candidates_json,
-        str(next_row["auftrag"]),
-    )
-
-
-def confirm_address_suggestion_auto(
-    address_state_json,
-    candidates_json,
-    selected_order_id,
-    selected_hits_json,
-    selected_address,
-):
-    """
-    Bestätigt die ausgewählte Adresse und springt anschließend automatisch
-    zum nächsten offenen MANUELL-PRÜFEN-Auftrag.
-    """
-    full = _read_json_records(address_state_json)
-
-    if full.empty:
-        raise gr.Error("Keine geprüften Adressen vorhanden.")
-
-    if not selected_order_id:
-        raise gr.Error("Es ist kein Auftrag zur Prüfung ausgewählt.")
-
-    selected_address = str(selected_address or "").strip()
-    if not selected_address:
-        raise gr.Error("Bitte einen Adressvorschlag auswählen.")
-
-    try:
-        hits = json.loads(selected_hits_json or "[]")
-    except Exception:
-        hits = []
-
-    chosen = next(
-        (
-            h for h in hits
-            if str(h.get("display_name", "")).strip() == selected_address
-        ),
-        None,
-    )
-
-    # Auch den aktuell angezeigten Treffer akzeptieren.
-    if chosen is None:
-        current_match = full[full["auftrag"].astype(str) == str(selected_order_id)]
-        if not current_match.empty:
-            current = current_match.iloc[0]
-            if str(current.get("treffer", "") or "").strip() == selected_address:
-                chosen = {
-                    "display_name": selected_address,
-                    "lat": current.get("lat"),
-                    "lon": current.get("lon"),
-                    "confidence": current.get("confidence", 0),
-                    "provider": current.get("provider", ""),
-                }
+    hits = json.loads(hits_json or "[]")
+    chosen = next((h for h in hits if h.get("display_name") == selected), None)
 
     if chosen is None:
-        raise gr.Error("Der gewählte Adressvorschlag konnte intern nicht zugeordnet werden.")
+        current = full[full["auftrag"].astype(str) == str(oid)].iloc[0]
+        if str(current.get("treffer", "")) == str(selected):
+            chosen = {
+                "display_name": selected,
+                "lat": current["lat"],
+                "lon": current["lon"],
+                "confidence": current["confidence"],
+                "provider": current["provider"],
+            }
 
-    if chosen.get("lat") is None or chosen.get("lon") is None:
-        raise gr.Error("Der gewählte Vorschlag besitzt keine gültigen Koordinaten.")
+    if chosen is None or chosen.get("lat") is None or chosen.get("lon") is None:
+        raise gr.Error("Vorschlag konnte nicht übernommen werden.")
 
-    mask = full["auftrag"].astype(str) == str(selected_order_id)
-    if not mask.any():
-        raise gr.Error("Auftrag wurde nicht gefunden.")
-
-    full.loc[mask, "treffer"] = chosen.get("display_name", "")
-    full.loc[mask, "confidence"] = float(chosen.get("confidence", 0) or 0)
-    full.loc[mask, "lat"] = chosen.get("lat")
-    full.loc[mask, "lon"] = chosen.get("lon")
+    mask = full["auftrag"].astype(str) == str(oid)
+    full.loc[mask, "treffer"] = chosen["display_name"]
+    full.loc[mask, "lat"] = chosen["lat"]
+    full.loc[mask, "lon"] = chosen["lon"]
+    full.loc[mask, "confidence"] = chosen.get("confidence", 0)
     full.loc[mask, "provider"] = chosen.get("provider", "")
     full.loc[mask, "status"] = "MANUELL BESTÄTIGT"
-    full.loc[mask, "fehler"] = ""
 
-    next_row = _next_manual_order(full, after_order_id=str(selected_order_id))
-
+    next_row = _next_open(full)
     if next_row is None:
-        next_order = ""
-        next_hits = "[]"
-        next_info = "### Ausgewählte Zeile\n✅ Alle unsicheren Adressen wurden bestätigt."
-        next_choice = gr.update(choices=[], value=None, interactive=False)
-        next_note = "✅ Adressprüfung abgeschlossen."
-    else:
-        (
-            next_order,
-            next_hits,
-            next_info,
-            next_choice,
-            next_note,
-        ) = _selection_payload_for_order(
-            full,
-            candidates_json,
-            str(next_row["auftrag"]),
-        )
-
-    confirmed_msg = (
-        f"✅ **Adresse bestätigt:** {chosen.get('display_name', '')}"
-    )
-
-    return (
-        _address_visible_df(full),
-        full.to_json(orient="records", force_ascii=False),
-        _address_status_text(full),
-        confirmed_msg,
-        next_order,
-        next_hits,
-        next_info,
-        next_choice,
-        next_note,
-    )
-
-
-def search_depot_address(depot_address):
-    """
-    Sucht die Depotadresse automatisch.
-    Hohe Sicherheit -> bester Treffer wird vorausgewählt.
-    Niedrige Sicherheit -> mehrere Vorschläge zur Auswahl.
-    """
-    depot_address = str(depot_address or "").strip()
-    if not depot_address:
-        raise gr.Error("Bitte eine Depotadresse eingeben.")
-
-    geocoder = Geocoder(timeout=TIMEOUT)
-
-    try:
-        hits = geocoder.search(depot_address, limit=5)
-    except Exception as exc:
-        raise gr.Error(
-            "Depotadresse konnte nicht geprüft werden.\n\n"
-            f"{type(exc).__name__}: {exc}"
-        )
-
-    if not hits:
-        return (
+        next_oid, next_hits, info, choice = (
+            "",
             "[]",
-            gr.update(
-                choices=[],
-                value=None,
-                interactive=False,
-                label="Gefundene Depotadresse",
-            ),
-            (
-                "⚠️ **Keine passende Depotadresse gefunden.**  \n"
-                "Bitte Straße, Hausnummer, PLZ und Ort möglichst vollständig eingeben."
-            ),
-            "",
-        )
-
-    choices = [str(h.get("display_name", "")).strip() for h in hits]
-    choices = [c for c in choices if c]
-    choices = list(dict.fromkeys(choices))
-
-    best = hits[0]
-    best_address = str(best.get("display_name", "")).strip()
-    confidence = float(best.get("confidence", 0) or 0)
-
-    if confidence >= 0.72:
-        status = (
-            f"✅ **Depotvorschlag gefunden**  \n"
-            f"{best_address}  \n"
-            f"Sicherheit: {round(confidence * 100)} %  \n\n"
-            "Bitte prüfen und anschließend bestätigen."
+            "✅ **Adressprüfung abgeschlossen.**",
+            gr.update(choices=[], value=None, interactive=False),
         )
     else:
-        status = (
-            f"⚠️ **Depotadresse nicht eindeutig**  \n"
-            f"Bester Treffer: {best_address}  \n"
-            f"Sicherheit: {round(confidence * 100)} %  \n\n"
-            "Bitte unten den richtigen Vorschlag auswählen."
+        next_oid = str(next_row["auftrag"])
+        all_candidates = json.loads(candidates_json or "{}")
+        hits2 = all_candidates.get(next_oid, [])
+        choices = [h.get("display_name", "") for h in hits2 if h.get("display_name")]
+        current2 = str(next_row.get("treffer", "") or "")
+        if current2 and current2 not in choices:
+            choices.insert(0, current2)
+        next_hits = json.dumps(hits2, ensure_ascii=False)
+        info = f"### Jetzt prüfen\n**{next_row['kunde']}**  \n{next_row['eingabe']}"
+        choice = gr.update(
+            choices=choices,
+            value=choices[0] if choices else None,
+            interactive=bool(choices),
         )
 
     return (
-        json.dumps(hits, ensure_ascii=False),
-        gr.update(
-            choices=choices,
-            value=best_address if best_address in choices else (choices[0] if choices else None),
-            interactive=bool(choices),
-            label="Gefundene Depotadresse",
-        ),
-        status,
-        "",
+        address_visible(full),
+        full.to_json(orient="records", force_ascii=False),
+        address_status(full),
+        f"✅ Bestätigt: **{selected}**",
+        next_oid,
+        next_hits,
+        info,
+        choice,
     )
-
-
-def confirm_depot_address(depot_input, depot_hits_json, selected_depot_address):
-    """
-    Bestätigt nur die lesbare Depotadresse.
-    Koordinaten werden intern in depot_state gespeichert.
-    """
-    depot_input = str(depot_input or "").strip()
-    selected_depot_address = str(selected_depot_address or "").strip()
-
-    if not depot_input:
-        raise gr.Error("Bitte zuerst eine Depotadresse eingeben.")
-
-    if not selected_depot_address:
-        raise gr.Error("Bitte zuerst einen Depotvorschlag auswählen.")
-
-    try:
-        hits = json.loads(depot_hits_json or "[]")
-    except Exception:
-        hits = []
-
-    chosen = next(
-        (
-            h for h in hits
-            if str(h.get("display_name", "")).strip() == selected_depot_address
-        ),
-        None,
-    )
-
-    if chosen is None:
-        raise gr.Error("Der ausgewählte Depotvorschlag konnte intern nicht zugeordnet werden.")
-
-    if chosen.get("lat") is None or chosen.get("lon") is None:
-        raise gr.Error("Der Depotvorschlag besitzt keine gültigen Koordinaten.")
-
-    state = json.dumps(
-        {
-            "address_input": depot_input,
-            "display_name": chosen.get("display_name", ""),
-            "lat": float(chosen["lat"]),
-            "lon": float(chosen["lon"]),
-            "confidence": float(chosen.get("confidence", 0) or 0),
-            "provider": chosen.get("provider", ""),
-        },
-        ensure_ascii=False,
-    )
-
-    text = (
-        "✅ **Depot bestätigt**  \n"
-        f"{chosen.get('display_name', '')}"
-    )
-
-    return state, text
-
-
-def depot_input_changed():
-    """
-    Löscht eine alte Depotbestätigung, sobald die Eingabe geändert wird.
-    """
-    return (
-        "",
-        "[]",
-        gr.update(choices=[], value=None, interactive=False),
-        "Depotadresse geändert – bitte erneut prüfen.",
-    )
-
-
-def _forecast_markdown(df):
-    if df.empty:
-        return "⚠️ Keine Forecast-Ergebnisse vorhanden."
-
-    lines = ["## Forecast-Ergebnis", ""]
-    for _, r in df.iterrows():
-        lines.extend([
-            f"### 🚚 {r['vehicle_id']}",
-            f"- Distanz: **{r['distanz_km']} km**",
-            f"- Basis-Fahrzeit: **{r['basis_fahrzeit_min']} min**",
-            f"- Live-/Störungszuschlag: **{r['live_zuschlag_min']} min**",
-            f"- Servicezeit: **{r['servicezeit_min']} min**",
-            f"- Gesamtzeit: **{r['gesamtzeit_min']} min**",
-            f"- Paletten: **{r['paletten']}**",
-            f"- Gewicht: **{r['gewicht_kg']:,} kg**",
-            f"- Traffic Score: **{r['traffic_score']}**",
-            f"- Datenvertrauen: **{r['datenvertrauen_pct']} %**",
-            "",
-        ])
-    return "\n".join(lines)
 
 
 def save_addresses(address_state_json, orders_json):
-    orders = _read_json_records(orders_json)
-    adr = _read_json_records(address_state_json)
-    if orders.empty:
-        raise gr.Error("Keine Aufträge vorhanden.")
-    required_cols = ["auftrag","treffer","lat","lon"]
-    missing = [c for c in required_cols if c not in adr.columns]
-    if missing:
-        raise gr.Error("Adressprüfung unvollständig: " + ", ".join(missing))
+    full = _read_json(address_state_json)
+    orders = _read_json(orders_json)
 
-    adr["auftrag"] = adr["auftrag"].astype(str)
-    orders["auftrag"] = orders["auftrag"].astype(str)
+    if full.empty:
+        raise gr.Error("Keine Adressprüfung vorhanden.")
+    if (full["status"] == "MANUELL PRÜFEN").any():
+        raise gr.Error("Es sind noch Adressen offen.")
 
     merged = orders.merge(
-        adr[["auftrag","treffer","lat","lon"]],
+        full[["auftrag", "treffer", "lat", "lon"]],
         on="auftrag",
         how="left",
     )
-    if merged[["lat","lon"]].isna().any().any():
-        bad = merged[merged[["lat","lon"]].isna().any(axis=1)]["auftrag"].tolist()
-        raise gr.Error("Fehlende Koordinaten bei: " + ", ".join(map(str, bad)))
+    if merged[["lat", "lon"]].isna().any().any():
+        raise gr.Error("Mindestens eine Adresse hat keine Koordinaten.")
 
-    merged["lat"] = pd.to_numeric(merged["lat"], errors="raise")
-    merged["lon"] = pd.to_numeric(merged["lon"], errors="raise")
-    return merged.to_json(orient="records", force_ascii=False), "✅ Adressen übernommen."
+    return (
+        merged.to_json(orient="records", force_ascii=False),
+        "✅ Adressen abgeschlossen. Weiter zur Flotte und Clusterbildung.",
+    )
 
-def distribute(orders_geo_json, vehicle_table):
-    orders = _read_json_records(orders_geo_json)
+
+def search_depot(address):
+    address = str(address or "").strip()
+    if not address:
+        raise gr.Error("Depotadresse eingeben.")
+
+    hits = Geocoder(TIMEOUT).search(address, 5)
+    if not hits:
+        return (
+            "[]",
+            gr.update(choices=[], value=None, interactive=False),
+            "⚠️ Kein Depot-Treffer.",
+        )
+
+    choices = [h["display_name"] for h in hits]
+    return (
+        json.dumps(hits, ensure_ascii=False),
+        gr.update(choices=choices, value=choices[0], interactive=True),
+        "Depotvorschlag gefunden – bitte bestätigen.",
+    )
+
+
+def confirm_depot(input_address, hits_json, selected):
+    hits = json.loads(hits_json or "[]")
+    chosen = next((h for h in hits if h.get("display_name") == selected), None)
+    if not chosen:
+        raise gr.Error("Depotvorschlag auswählen.")
+
+    state = {
+        "address_input": input_address,
+        "display_name": chosen["display_name"],
+        "lat": chosen["lat"],
+        "lon": chosen["lon"],
+        "confidence": chosen.get("confidence", 0),
+        "provider": chosen.get("provider", ""),
+    }
+    return json.dumps(state, ensure_ascii=False), f"✅ **Depot:** {chosen['display_name']}"
+
+
+def create_clusters(geo_json, vehicle_table, depot_json):
+    orders = _read_json(geo_json)
     vehicles = pd.DataFrame(vehicle_table)
 
     if orders.empty:
-        raise gr.Error("Bitte zuerst die geprüften Adressen übernehmen.")
+        raise gr.Error("Adressprüfung zuerst abschließen.")
     if vehicles.empty:
-        raise gr.Error("Keine Fahrzeuge vorhanden.")
-
-    ass, util, warnings = distribute_orders(orders, vehicles)
-    msg = "✅ Alle Aufträge zugewiesen." if not warnings else "⚠️ " + " | ".join(warnings)
-    return ass, util, ass.to_json(orient="records", force_ascii=False), msg
-
-def calculate(assign_json, vehicle_table, depot_json):
-    ass = _read_json_records(assign_json)
-    vehicles = pd.DataFrame(vehicle_table)
-    if ass.empty:
-        raise gr.Error("Bitte zuerst die Kapazität verteilen.")
-
+        raise gr.Error("Keine Fahrzeuge.")
     if not depot_json:
-        raise gr.Error("Bitte zuerst die Depotadresse automatisch prüfen und anschließend bestätigen.")
+        raise gr.Error("Depot zuerst bestätigen.")
 
-    try:
-        depot = json.loads(depot_json)
-        depot_coord = (float(depot["lat"]), float(depot["lon"]))
-    except Exception:
-        raise gr.Error("Depotdaten sind ungültig. Bitte Depot erneut prüfen.")
+    depot = json.loads(depot_json)
+    depot_coord = (float(depot["lat"]), float(depot["lon"]))
 
-    router = OSRMRouter(
-        os.getenv("OSRM_BASE_URL","https://router.project-osrm.org"),
-        TIMEOUT
+    assignments, summary, warnings = cluster_orders(
+        orders, vehicles, depot_coord
     )
 
-    routes, summaries, debug = [], [], []
+    msg = (
+        "✅ Geografische Cluster erstellt. "
+        "Jeder LKW erhält ein möglichst zusammenhängendes Liefergebiet."
+    )
+    if warnings:
+        msg += "\n\n⚠️ " + " | ".join(warnings)
 
-    for vid, group in ass[ass.vehicle_id != "NICHT ZUGEWIESEN"].groupby("vehicle_id"):
-        vmatch = vehicles[vehicles.vehicle_id == vid]
-        if vmatch.empty:
+    visible = assignments[
+        [
+            "cluster_id", "vehicle_id", "auftrag", "kunde",
+            "adresse", "paletten", "gesamtgewicht_kg"
+        ]
+    ].copy()
+
+    return (
+        visible,
+        summary,
+        assignments.to_json(orient="records", force_ascii=False),
+        msg,
+    )
+
+
+def optimize_routes(cluster_json, vehicle_table, depot_json):
+    clustered = _read_json(cluster_json)
+    vehicles = pd.DataFrame(vehicle_table)
+
+    if clustered.empty:
+        raise gr.Error("Zuerst Cluster bilden.")
+    depot = json.loads(depot_json)
+    depot_coord = (float(depot["lat"]), float(depot["lon"]))
+
+    router = OSRMRouter(
+        os.getenv("OSRM_BASE_URL", "https://router.project-osrm.org"),
+        TIMEOUT,
+    )
+
+    route_rows = []
+    routes = []
+    debug = []
+
+    active = clustered[clustered["vehicle_id"] != "NICHT ZUGEWIESEN"]
+
+    for vid, group in active.groupby("vehicle_id"):
+        vehicle = vehicles[vehicles["vehicle_id"].astype(str) == str(vid)]
+        if vehicle.empty:
             continue
-        v = vmatch.iloc[0]
+        v = vehicle.iloc[0]
 
-        stop_coords = [(float(x.lat), float(x.lon)) for _, x in group.iterrows()]
-        coords = [depot_coord] + stop_coords + [depot_coord]
-
+        stops = [r.to_dict() for _, r in group.iterrows()]
         try:
-            route = router.route(coords)
-        except Exception as e:
-            debug.append({"vehicle_id": vid, "provider": "OSRM", "error": str(e)})
+            result = router.optimize_roundtrip(depot_coord, stops)
+        except Exception as exc:
+            debug.append({"vehicle_id": vid, "error": str(exc)})
             continue
 
-        try:
-            autobahn = AutobahnProvider(timeout=TIMEOUT).analyze_route(
-                route["geometry"], route["duration_s"]
-            )
-        except Exception as e:
-            autobahn = {
-                "provider": "Autobahn API",
-                "available": False,
-                "score": 0,
-                "confidence": 0,
-                "delay_s": 0,
-                "error": str(e),
-            }
-
-        traffic = combine([autobahn], {"Autobahn API": 1.0})
-        service = float(group.service_min.sum())
-        summary = forecast_summary(
-            route["distance_m"], route["duration_s"], traffic["delay_s"], service
-        )
-        summary.update({
-            "vehicle_id": vid,
-            "paletten": int(group.paletten.sum()),
-            "gewicht_kg": int(group.gesamtgewicht_kg.sum()),
-            "traffic_score": round(traffic["score"],1),
-            "datenvertrauen_pct": round(traffic["confidence"]*100),
-        })
-        summaries.append(summary)
-
-        stops = [{
-            "lat": float(r.lat),
-            "lon": float(r.lon),
-            "kunde": r.kunde,
-            "paletten": int(r.paletten),
-            "gesamtgewicht_kg": int(r.gesamtgewicht_kg),
-        } for _, r in group.iterrows()]
+        ordered = result["ordered_stops"]
+        ordered_records = []
+        for seq, stop in enumerate(ordered, 1):
+            stop = dict(stop)
+            stop["stopp_nr"] = seq
+            ordered_records.append(stop)
+            route_rows.append({
+                "vehicle_id": vid,
+                "cluster_id": stop.get("cluster_id", ""),
+                "stopp_nr": seq,
+                "auftrag": stop.get("auftrag", ""),
+                "kunde": stop.get("kunde", ""),
+                "adresse": stop.get("adresse", ""),
+                "paletten": int(stop.get("paletten", 0)),
+                "gewicht_kg": int(stop.get("gesamtgewicht_kg", 0)),
+            })
 
         routes.append({
             "vehicle_id": vid,
-            "color": v["color"],
-            "geometry": route["geometry"],
-            "stops": stops,
+            "cluster_id": str(group.iloc[0]["cluster_id"]),
+            "color": v.get("color", "#2563eb"),
+            "geometry": result["geometry"],
+            "stops": [
+                {
+                    "auftrag": s.get("auftrag", ""),
+                    "kunde": s.get("kunde", ""),
+                    "lat": float(s["lat"]),
+                    "lon": float(s["lon"]),
+                    "paletten": int(s["paletten"]),
+                    "gesamtgewicht_kg": int(s["gesamtgewicht_kg"]),
+                }
+                for s in ordered_records
+            ],
+            "distance_m": float(result["distance_m"]),
+            "duration_s": float(result["duration_s"]),
+            "optimizer": result.get("optimizer", "osrm-trip"),
+            "service_min": float(group["service_min"].sum()),
         })
 
         debug.append({
             "vehicle_id": vid,
-            "traffic": traffic,
-            "autobahn_raw": autobahn,
-            "osrm_summary": {
-                "distance_m": route["distance_m"],
-                "duration_s": route["duration_s"],
-            },
-            "note": "Aktuell kein kommerzieller Live-Traffic-Key konfiguriert.",
+            "optimizer": result.get("optimizer"),
+            "distance_m": result["distance_m"],
+            "duration_s": result["duration_s"],
+            "optimized_stop_count": len(ordered),
         })
 
     if not routes:
-        raise gr.Error("Keine Route konnte erfolgreich berechnet werden.")
+        raise gr.Error("Keine Route konnte optimiert werden.")
 
-    forecast_df = pd.DataFrame(summaries)
-
+    choices = ["Alle Touren"] + [r["vehicle_id"] for r in routes]
     return (
-        build_map(routes),
-        forecast_df,
-        _forecast_markdown(forecast_df),
-        json.dumps(debug, ensure_ascii=False, indent=2, default=str),
+        pd.DataFrame(route_rows),
+        gr.update(choices=choices, value="Alle Touren", interactive=True),
+        build_map(routes, depot),
+        json.dumps(routes, ensure_ascii=False),
+        json.dumps(debug, ensure_ascii=False, indent=2),
+        "✅ Routen innerhalb der regionalen Cluster optimiert.",
     )
+
+
+def render_route(routes_json, selected, depot_json):
+    routes = json.loads(routes_json or "[]")
+    depot = json.loads(depot_json or "{}")
+    if selected and selected != "Alle Touren":
+        routes = [r for r in routes if str(r["vehicle_id"]) == str(selected)]
+    return build_map(routes, depot)
+
+
+def calculate_forecast(routes_json):
+    routes = json.loads(routes_json or "[]")
+    if not routes:
+        raise gr.Error("Zuerst Routen optimieren.")
+
+    provider = AutobahnProvider(timeout=TIMEOUT)
+    rows = []
+    debug = []
+
+    for r in routes:
+        traffic_raw = provider.analyze_route(r["geometry"], r["duration_s"])
+        traffic = combine([traffic_raw], {"Autobahn API": 1.0})
+
+        summary = forecast_summary(
+            r["distance_m"],
+            r["duration_s"],
+            traffic["delay_s"],
+            r["service_min"],
+        )
+        summary.update({
+            "vehicle_id": r["vehicle_id"],
+            "cluster_id": r["cluster_id"],
+            "stopps": len(r["stops"]),
+            "paletten": sum(int(s["paletten"]) for s in r["stops"]),
+            "gewicht_kg": sum(int(s["gesamtgewicht_kg"]) for s in r["stops"]),
+            "traffic_score": round(traffic["score"], 1),
+            "datenvertrauen_pct": round(traffic["confidence"] * 100),
+        })
+        rows.append(summary)
+        debug.append({
+            "vehicle_id": r["vehicle_id"],
+            "traffic": traffic,
+            "hinweis": (
+                "Verkehr wird bewusst erst NACH der Routenoptimierung geprüft. "
+                "Die Autobahn-API-Routenmatchlogik ist der nächste Ausbauschritt."
+            ),
+        })
+
+    df = pd.DataFrame(rows)
+    lines = ["## Forecast nach Routenoptimierung", ""]
+    for _, r in df.iterrows():
+        lines += [
+            f"### 🚚 {r['vehicle_id']} · {r['cluster_id']}",
+            f"- Stopps: **{r['stopps']}**",
+            f"- Distanz: **{r['distanz_km']} km**",
+            f"- Basis-Fahrzeit: **{r['basis_fahrzeit_min']} min**",
+            f"- Störungs-/Live-Zuschlag: **{r['live_zuschlag_min']} min**",
+            f"- Servicezeit: **{r['servicezeit_min']} min**",
+            f"- Gesamtzeit: **{r['gesamtzeit_min']} min**",
+            "",
+        ]
+
+    return df, "\n".join(lines), json.dumps(debug, ensure_ascii=False, indent=2, default=str)
 
 
 CSS = """
-.step-title{font-size:1.35rem;font-weight:700;margin-bottom:.35rem}
-.muted{color:#6b7280}
+.step-title{font-size:1.35rem;font-weight:750;margin-bottom:.35rem}
+.process{padding:.8rem 1rem;border:1px solid #d1d5db;border-radius:12px;margin:.3rem 0}
+#tour-map iframe{width:100%!important;min-height:560px!important;height:62vh!important;border-radius:12px}
+#tour-map{min-height:560px}
+@media(max-width:768px){
+  #tour-map iframe{min-height:500px!important;height:58vh!important}
+}
 """
 
-with gr.Blocks(title="Logistik Forecast 4.9.2", css=CSS) as demo:
-    gr.Markdown("# Logistik Forecast 4.9.2\nMehrstufige Python-/Gradio-Demo")
+with gr.Blocks(title="Logistik Forecast 4.9.3", css=CSS) as demo:
+    gr.Markdown(
+        "# Logistik Forecast 4.9.3\n"
+        "**Neue feste Prozessstruktur:** Adressen → Flotte → regionale Cluster → "
+        "Routenoptimierung → Verkehr/Forecast"
+    )
 
     orders_state = gr.State("[]")
-    geo_state = gr.State("[]")
-    assignments_state = gr.State("[]")
+    address_state = gr.State("[]")
     candidates_state = gr.State("{}")
+    geo_state = gr.State("[]")
+    depot_hits_state = gr.State("[]")
     depot_state = gr.State("")
+    cluster_state = gr.State("[]")
+    routes_state = gr.State("[]")
+    selected_order_state = gr.State("")
+    selected_hits_state = gr.State("[]")
 
     with gr.Tabs():
-        with gr.Tab("1 · CSV & Adressen"):
-            gr.Markdown(
-                '<div class="step-title">CSV importieren und Adressen prüfen</div>'
-            )
-
-            upload = gr.File(
-                label="Kunden-CSV auswählen",
-                file_types=[".csv"],
-                type="filepath",
-            )
-            import_btn = gr.Button(
-                "CSV importieren",
-                variant="primary",
-            )
-
+        with gr.Tab("1 · Aufträge & Adressen"):
+            gr.Markdown('<div class="step-title">1. CSV importieren und Adressen einmal sauber prüfen</div>')
+            upload = gr.File(label="CSV-Datei", file_types=[".csv"], type="filepath")
+            import_btn = gr.Button("CSV importieren", variant="primary")
             order_summary = gr.Markdown()
-            orders_table = gr.Dataframe(
-                interactive=False,
-                label="Importierte Aufträge",
-                wrap=True,
-            )
+            orders_table = gr.Dataframe(label="Aufträge", interactive=False, wrap=True)
 
-            geocode_btn = gr.Button(
-                "CSV importieren und Adressen prüfen",
-                variant="primary",
-            )
-
-            gr.Markdown("### Prüfstatus")
-            address_status = gr.Markdown("Noch keine Adressen geprüft.")
-            address_note = gr.Markdown()
-
-            # Vollständige Geocoding-Daten bleiben unsichtbar im State.
-            address_state = gr.State("[]")
-
+            geocode_btn = gr.Button("Adressen automatisch prüfen")
+            address_status_md = gr.Markdown()
             address_table = gr.Dataframe(
-                headers=[
-                    "auftrag",
-                    "kunde",
-                    "adresse",
-                    "status",
-                    "treffer",
-                    "sicherheit",
-                ],
-                interactive=False,
+                headers=["auftrag","kunde","adresse","status","treffer","sicherheit"],
                 label="Adressprüfung",
+                interactive=False,
                 wrap=True,
             )
 
-            gr.Markdown("---")
-
-            selected_order_state = gr.State("")
-            selected_hits_state = gr.State("[]")
-
-            selected_address_info = gr.Markdown(
-                "### Ausgewählte Zeile\nNoch keine Zeile ausgewählt."
-            )
-
+            gr.Markdown("### Nur unsichere Adressen")
+            review_info = gr.Markdown("Noch keine Prüfung gestartet.")
             address_choice = gr.Radio(
-                choices=[],
-                value=None,
-                label="Welche Adresse ist richtig?",
-                interactive=False,
+                choices=[], label="Welche Adresse ist richtig?", interactive=False
             )
+            confirm_review_btn = gr.Button("Adresse bestätigen", variant="primary")
+            confirm_status = gr.Markdown()
+            finish_addresses_btn = gr.Button("Adressprüfung abschließen")
+            finish_status = gr.Markdown()
 
-            address_choice_note = gr.Markdown()
+        with gr.Tab("2 · Depot, Flotte & Regionen"):
+            gr.Markdown('<div class="step-title">2. Depot und Fahrzeugkapazität festlegen</div>')
 
-            confirm_suggestion_btn = gr.Button(
-                "Ausgewählte Adresse bestätigen",
-                variant="primary",
-            )
-            suggestion_status = gr.Markdown()
-
-            save_address_btn = gr.Button(
-                "Adressprüfung abschließen",
-                variant="secondary",
-            )
-            address_saved = gr.Markdown()
-
-        with gr.Tab("2 · Flotte & Kapazität"):
-            gr.Markdown('<div class="step-title">Fahrzeuge skalieren und Kapazität verteilen</div>')
-            with gr.Row():
-                small_count = gr.Number(label="Anzahl 14-t-LKW", value=3, precision=0, minimum=0)
-                large_count = gr.Number(label="Anzahl 40-t-LKW", value=3, precision=0, minimum=0)
-                update_fleet_btn = gr.Button("Flotte aktualisieren", variant="secondary")
-
-            fleet_summary = gr.Markdown()
-            vehicle_table = gr.Dataframe(
-                value=_make_vehicle_rows(3,3),
-                interactive=True,
-                label="Verfügbare Fahrzeuge",
-            )
-
-            gr.Markdown(
-                "Fahrzeuge können zusätzlich direkt in der Tabelle angepasst werden. "
-                "Palettenplätze und Nutzlast werden parallel geprüft."
-            )
-            distribute_btn = gr.Button("Kapazität automatisch verteilen", variant="primary")
-            allocation_status = gr.Markdown()
-            assignments_table = gr.Dataframe(label="Auftragszuweisung")
-            utilization_table = gr.Dataframe(label="Fahrzeugauslastung")
-
-        with gr.Tab("3 · Forecast & Verkehr"):
-            gr.Markdown('<div class="step-title">Routen, Verkehr und API-Kontrolle</div>')
-            gr.Markdown(
-                "OSRM liefert die Straßenroute. Die Autobahn-API ergänzt verfügbare "
-                "offizielle Meldungen. Ohne zusätzliche Live-Traffic-Quelle bleibt "
-                "der echte Verkehrszuschlag teilweise 0."
-            )
-
-            gr.Markdown("### Depot / Tourstart")
-            gr.Markdown(
-                "Depotadresse vollständig eingeben. Die App sucht automatisch passende Adressen "
-                "und zeigt nur lesbare Vorschläge."
-            )
-
-            depot_hits_state = gr.State("[]")
-
-            depot_address = gr.Textbox(
+            depot_input = gr.Textbox(
                 label="Depotadresse",
                 placeholder="z. B. Mercedesstraße 1, 70372 Stuttgart",
             )
-
-            depot_search_btn = gr.Button(
-                "Depotadresse automatisch prüfen",
-                variant="secondary",
-            )
-
+            depot_search_btn = gr.Button("Depot automatisch prüfen")
             depot_choice = gr.Radio(
-                choices=[],
-                value=None,
-                label="Gefundene Depotadresse",
-                interactive=False,
+                choices=[], label="Gefundene Depotadresse", interactive=False
             )
-
             depot_search_status = gr.Markdown()
-
-            depot_confirm_btn = gr.Button(
-                "Depotadresse bestätigen",
-                variant="primary",
-            )
-
+            depot_confirm_btn = gr.Button("Depot bestätigen", variant="primary")
             depot_status = gr.Markdown()
 
-            forecast_btn = gr.Button("Forecast berechnen", variant="primary")
-
-            forecast_summary_md = gr.Markdown()
-
+            gr.Markdown("### Flotte")
             with gr.Row():
-                with gr.Column(scale=3):
-                    map_html = gr.HTML(label="Karte")
-                with gr.Column(scale=1):
-                    forecast_table = gr.Dataframe(label="Forecast je LKW")
+                small_count = gr.Number(label="14-t-LKW", value=3, minimum=0, precision=0)
+                large_count = gr.Number(label="40-t-LKW", value=3, minimum=0, precision=0)
+                fleet_btn = gr.Button("Flotte aktualisieren")
+            fleet_status = gr.Markdown()
+            vehicle_table = gr.Dataframe(
+                value=make_fleet(3, 3),
+                label="Verfügbare Fahrzeuge",
+                interactive=True,
+                wrap=True,
+            )
 
-            with gr.Accordion("API-Debug – technische Details", open=False):
-                debug_json = gr.Code(language="json", label="Traffic-/Routing-Debug")
+            gr.Markdown(
+                "### 3. Geografische Cluster bilden\n"
+                "Jetzt werden nahe Stopps zu zusammenhängenden Liefergebieten gebündelt. "
+                "Kapazität und Nutzlast bleiben harte Grenzen."
+            )
+            cluster_btn = gr.Button("Regionen bilden & LKW zuweisen", variant="primary")
+            cluster_status = gr.Markdown()
+            cluster_summary = gr.Dataframe(label="Regionen / LKW-Auslastung", wrap=True)
+            cluster_assignments = gr.Dataframe(label="Aufträge nach Region", wrap=True)
+
+        with gr.Tab("3 · Routenoptimierung"):
+            gr.Markdown(
+                '<div class="step-title">4. Stopp-Reihenfolge je LKW optimieren</div>'
+            )
+            gr.Markdown(
+                "Erst jetzt wird innerhalb jedes regionalen Clusters die schnellere "
+                "Stopp-Reihenfolge gesucht. Verkehr beeinflusst diesen Schritt noch nicht."
+            )
+            optimize_btn = gr.Button("LKW-Routen optimieren", variant="primary")
+            optimize_status = gr.Markdown()
+            optimized_stops = gr.Dataframe(label="Optimierte Stopp-Reihenfolge", wrap=True)
+
+            route_selector = gr.Dropdown(
+                choices=[], label="Tour anzeigen", interactive=False
+            )
+            map_html = gr.HTML(elem_id="tour-map")
+            with gr.Accordion("Routing-Debug", open=False):
+                routing_debug = gr.Code(language="json")
+
+        with gr.Tab("4 · Verkehr & Forecast"):
+            gr.Markdown(
+                '<div class="step-title">5. Erst die fertige Route auf Störungen prüfen</div>'
+            )
+            gr.Markdown(
+                "Hier werden die bereits optimierten Touren auf Verkehr, Baustellen, "
+                "Ferien und weitere Einflussfaktoren geprüft. Dadurch gibt es kein "
+                "Ping-Pong mehr zwischen Verteilung und Forecast."
+            )
+            forecast_btn = gr.Button("Verkehr prüfen & Forecast berechnen", variant="primary")
+            forecast_md = gr.Markdown()
+            forecast_table = gr.Dataframe(label="Forecast je LKW", wrap=True)
+            with gr.Accordion("Traffic-Debug", open=False):
+                traffic_debug = gr.Code(language="json")
 
     import_btn.click(
-        read_csv,
-        upload,
-        [orders_table, order_summary, orders_state],
+        read_csv, upload, [orders_table, order_summary, orders_state]
     )
+
     geocode_event = geocode_btn.click(
-        geocode_orders,
+        geocode_all,
         orders_state,
-        [
-            address_table,
-            address_state,
-            candidates_state,
-            address_status,
-            address_note,
-        ],
+        [address_table, address_state, candidates_state, address_status_md],
     )
-
     geocode_event.then(
-        prepare_first_manual_address,
+        prepare_review,
         [address_state, candidates_state],
-        [
-            selected_order_state,
-            selected_hits_state,
-            selected_address_info,
-            address_choice,
-            address_choice_note,
-        ],
+        [selected_order_state, selected_hits_state, review_info, address_choice],
     )
-    confirm_suggestion_btn.click(
-        confirm_address_suggestion_auto,
+
+    confirm_review_btn.click(
+        confirm_review,
+        [address_state, candidates_state, selected_order_state, selected_hits_state, address_choice],
         [
-            address_state,
-            candidates_state,
-            selected_order_state,
-            selected_hits_state,
-            address_choice,
-        ],
-        [
-            address_table,
-            address_state,
-            address_status,
-            suggestion_status,
-            selected_order_state,
-            selected_hits_state,
-            selected_address_info,
-            address_choice,
-            address_choice_note,
+            address_table, address_state, address_status_md, confirm_status,
+            selected_order_state, selected_hits_state, review_info, address_choice,
         ],
     )
 
-
-    save_address_btn.click(
+    finish_addresses_btn.click(
         save_addresses,
         [address_state, orders_state],
-        [geo_state, address_saved],
-    )
-    update_fleet_btn.click(
-        update_fleet,
-        [small_count, large_count],
-        [vehicle_table, fleet_summary],
-    )
-    distribute_btn.click(
-        distribute,
-        [geo_state, vehicle_table],
-        [assignments_table, utilization_table, assignments_state, allocation_status],
-    )
-    depot_address.change(
-        depot_input_changed,
-        None,
-        [
-            depot_state,
-            depot_hits_state,
-            depot_choice,
-            depot_status,
-        ],
+        [geo_state, finish_status],
     )
 
     depot_search_btn.click(
-        search_depot_address,
-        depot_address,
+        search_depot,
+        depot_input,
+        [depot_hits_state, depot_choice, depot_search_status],
+    )
+    depot_confirm_btn.click(
+        confirm_depot,
+        [depot_input, depot_hits_state, depot_choice],
+        [depot_state, depot_status],
+    )
+
+    fleet_btn.click(
+        update_fleet,
+        [small_count, large_count],
+        [vehicle_table, fleet_status],
+    )
+
+    cluster_btn.click(
+        create_clusters,
+        [geo_state, vehicle_table, depot_state],
+        [cluster_assignments, cluster_summary, cluster_state, cluster_status],
+    )
+
+    optimize_btn.click(
+        optimize_routes,
+        [cluster_state, vehicle_table, depot_state],
         [
-            depot_hits_state,
-            depot_choice,
-            depot_search_status,
-            depot_status,
+            optimized_stops, route_selector, map_html, routes_state,
+            routing_debug, optimize_status,
         ],
     )
 
-    depot_confirm_btn.click(
-        confirm_depot_address,
-        [
-            depot_address,
-            depot_hits_state,
-            depot_choice,
-        ],
-        [
-            depot_state,
-            depot_status,
-        ],
+    route_selector.change(
+        render_route,
+        [routes_state, route_selector, depot_state],
+        map_html,
     )
 
     forecast_btn.click(
-        calculate,
-        [assignments_state, vehicle_table, depot_state],
-        [map_html, forecast_table, forecast_summary_md, debug_json],
+        calculate_forecast,
+        routes_state,
+        [forecast_table, forecast_md, traffic_debug],
     )
+
 
 if __name__ == "__main__":
     demo.launch(
         server_name="0.0.0.0",
-        server_port=int(os.getenv("PORT","7860")),
+        server_port=int(os.getenv("PORT", "7860")),
         show_error=True,
     )
