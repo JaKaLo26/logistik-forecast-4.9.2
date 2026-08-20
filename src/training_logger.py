@@ -1,4 +1,7 @@
 # src/training_logger.py
+# Logistik Forecast 4.9.5
+# Persistiert Forecast- und IST-Daten in einem Hugging-Face-Dataset.
+# Bei Fehlern wird lokal in training_data/ weitergeschrieben.
 
 from __future__ import annotations
 
@@ -7,25 +10,13 @@ import os
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from huggingface_hub import HfApi, hf_hub_download
 
 
-# ============================================================
-# KONFIGURATION
-# ============================================================
-
-HF_TOKEN = os.getenv(
-    "HF_TOKEN",
-    ""
-).strip()
-
-HF_DATASET_REPO = os.getenv(
-    "HF_DATASET_REPO",
-    ""
-).strip()
-
+HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
+HF_DATASET_REPO = os.getenv("HF_DATASET_REPO", "").strip()
 LOCAL_DATA_DIR = Path(
     os.getenv(
         "LOCAL_TRAINING_DATA_DIR",
@@ -33,166 +24,61 @@ LOCAL_DATA_DIR = Path(
     )
 )
 
+FORECAST_RUNS_FILE = "forecasts/forecast_runs.jsonl"
+SEGMENTS_FILE = "forecasts/forecast_segments.jsonl"
+ACTUAL_TOURS_FILE = "actual/actual_tours.jsonl"
+ACTUAL_SEGMENTS_FILE = "actual/actual_segments.jsonl"
 
-# ============================================================
-# ZIELDATEIEN IM HF DATASET
-# ============================================================
-
-FORECAST_RUNS_FILE = (
-    "forecasts/forecast_runs.jsonl"
-)
-
-SEGMENTS_FILE = (
-    "forecasts/forecast_segments.jsonl"
-)
-
-ACTUAL_TOURS_FILE = (
-    "actual/actual_tours.jsonl"
-)
-
-ACTUAL_SEGMENTS_FILE = (
-    "actual/actual_segments.jsonl"
-)
-
-
-# ============================================================
-# HILFSFUNKTIONEN
-# ============================================================
 
 def _utc_now() -> str:
-
     return (
-        datetime.now(
-            timezone.utc
-        )
-        .replace(
-            microsecond=0
-        )
+        datetime.now(timezone.utc)
+        .replace(microsecond=0)
         .isoformat()
     )
 
 
-def _safe_int(
-    value: Any,
-    default: int = 0
-) -> int:
-
+def _safe_int(value: Any, default: int = 0) -> int:
     try:
-
-        return int(
-            round(
-                float(value)
-            )
-        )
-
-    except (
-        TypeError,
-        ValueError
-    ):
-
+        return int(round(float(value)))
+    except (TypeError, ValueError):
         return default
 
 
-def _safe_float(
-    value: Any,
-    default: float = 0.0
-) -> float:
-
+def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
-
-        return float(
-            value
-        )
-
-    except (
-        TypeError,
-        ValueError
-    ):
-
+        return float(value)
+    except (TypeError, ValueError):
         return default
 
 
-def _json_safe(
-    value: Any
-) -> Any:
-    """
-    Wandelt Werte in JSON-kompatible Typen um.
-    """
-
+def _json_safe(value: Any) -> Any:
     if value is None:
-
         return None
 
-    if isinstance(
-        value,
-        (
-            str,
-            int,
-            float,
-            bool
-        )
-    ):
-
+    if isinstance(value, (str, int, float, bool)):
         return value
 
-    if isinstance(
-        value,
-        datetime
-    ):
+    if isinstance(value, datetime):
+        return value.replace(microsecond=0).isoformat()
 
-        return (
-            value
-            .replace(
-                microsecond=0
-            )
-            .isoformat()
-        )
-
-    if isinstance(
-        value,
-        dict
-    ):
-
+    if isinstance(value, dict):
         return {
-            str(k):
-                _json_safe(v)
-            for k, v
-            in value.items()
+            str(key): _json_safe(item)
+            for key, item in value.items()
         }
 
-    if isinstance(
-        value,
-        (
-            list,
-            tuple
-        )
-    ):
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
 
-        return [
-            _json_safe(v)
-            for v
-            in value
-        ]
+    return str(value)
 
-    return str(
-        value
-    )
-
-
-# ============================================================
-# LOKALE FALLBACK-SPEICHERUNG
-# ============================================================
 
 def _append_local_jsonl(
     relative_path: str,
     record: Dict[str, Any]
 ) -> str:
-
-    target = (
-        LOCAL_DATA_DIR
-        / relative_path
-    )
-
+    target = LOCAL_DATA_DIR / relative_path
     target.parent.mkdir(
         parents=True,
         exist_ok=True
@@ -201,80 +87,44 @@ def _append_local_jsonl(
     with target.open(
         "a",
         encoding="utf-8"
-    ) as file:
-
-        file.write(
+    ) as handle:
+        handle.write(
             json.dumps(
-                _json_safe(
-                    record
-                ),
+                _json_safe(record),
                 ensure_ascii=False
             )
         )
+        handle.write("\n")
 
-        file.write(
-            "\n"
-        )
+    return str(target)
 
-    return str(
-        target
-    )
-
-
-# ============================================================
-# HF DATASET HILFSFUNKTION
-# ============================================================
 
 def _download_existing_jsonl(
     path_in_repo: str
 ) -> List[str]:
-    """
-    Lädt eine bereits vorhandene JSONL-Datei
-    aus dem Dataset.
-
-    Existiert sie noch nicht, wird [] zurückgegeben.
-    """
-
     if not HF_DATASET_REPO:
-
         return []
 
     try:
-
-        downloaded_path = (
-            hf_hub_download(
-                repo_id=
-                    HF_DATASET_REPO,
-
-                filename=
-                    path_in_repo,
-
-                repo_type=
-                    "dataset",
-
-                token=
-                    HF_TOKEN
-                    or None,
-            )
+        downloaded_path = hf_hub_download(
+            repo_id=HF_DATASET_REPO,
+            filename=path_in_repo,
+            repo_type="dataset",
+            token=HF_TOKEN or None,
         )
 
         with open(
             downloaded_path,
             "r",
             encoding="utf-8"
-        ) as file:
-
+        ) as handle:
             return [
-                line.rstrip(
-                    "\n"
-                )
-                for line
-                in file
+                line.rstrip("\n")
+                for line in handle
                 if line.strip()
             ]
 
     except Exception:
-
         return []
 
 
@@ -283,133 +133,64 @@ def _append_hf_jsonl(
     record: Dict[str, Any],
     commit_message: str
 ) -> Dict[str, Any]:
-    """
-    Bestehende JSONL laden,
-    neuen Datensatz anhängen,
-    komplette Datei wieder hochladen.
-
-    Für die aktuelle Projektgröße ausreichend.
-
-    Bei sehr großen Datenmengen wechseln wir später
-    auf Parquet-Shards / Batch-Schreiben.
-    """
-
     if not HF_DATASET_REPO:
-
-        raise RuntimeError(
-            "HF_DATASET_REPO fehlt."
-        )
+        raise RuntimeError("HF_DATASET_REPO fehlt.")
 
     if not HF_TOKEN:
+        raise RuntimeError("HF_TOKEN fehlt.")
 
-        raise RuntimeError(
-            "HF_TOKEN fehlt."
-        )
-
-    lines = (
-        _download_existing_jsonl(
-            path_in_repo
-        )
-    )
-
-    new_line = json.dumps(
-        _json_safe(
-            record
-        ),
-        ensure_ascii=False
+    lines = _download_existing_jsonl(
+        path_in_repo
     )
 
     lines.append(
-        new_line
+        json.dumps(
+            _json_safe(record),
+            ensure_ascii=False
+        )
     )
 
     api = HfApi(
         token=HF_TOKEN
     )
 
-    with tempfile.TemporaryDirectory() as tmp:
-
+    with tempfile.TemporaryDirectory() as temp_dir:
         local_file = (
-            Path(tmp)
-            / Path(
-                path_in_repo
-            ).name
+            Path(temp_dir)
+            / Path(path_in_repo).name
         )
 
         with local_file.open(
             "w",
             encoding="utf-8"
-        ) as file:
-
+        ) as handle:
             for line in lines:
-
-                file.write(
-                    line
-                )
-
-                file.write(
-                    "\n"
-                )
+                handle.write(line)
+                handle.write("\n")
 
         api.upload_file(
-            path_or_fileobj=
-                str(
-                    local_file
-                ),
-
-            path_in_repo=
-                path_in_repo,
-
-            repo_id=
-                HF_DATASET_REPO,
-
-            repo_type=
-                "dataset",
-
-            commit_message=
-                commit_message,
+            path_or_fileobj=str(local_file),
+            path_in_repo=path_in_repo,
+            repo_id=HF_DATASET_REPO,
+            repo_type="dataset",
+            commit_message=commit_message,
         )
 
     return {
-        "success":
-            True,
-
-        "storage":
-            "huggingface",
-
-        "repo":
-            HF_DATASET_REPO,
-
-        "path":
-            path_in_repo,
-
-        "records":
-            len(
-                lines
-            ),
+        "success": True,
+        "storage": "huggingface",
+        "repo": HF_DATASET_REPO,
+        "path": path_in_repo,
+        "records": len(lines),
     }
 
-
-# ============================================================
-# ROBUSTER APPEND
-# ============================================================
 
 def append_record(
     path_in_repo: str,
     record: Dict[str, Any],
     commit_message: str
 ) -> Dict[str, Any]:
-    """
-    Versucht zuerst HF Dataset.
-
-    Falls HF nicht funktioniert:
-    lokale JSONL als Fallback.
-    """
-
-    prepared = dict(
-        record
-    )
-
+    prepared = dict(record)
     prepared.setdefault(
         "logged_at",
         _utc_now()
@@ -417,67 +198,34 @@ def append_record(
 
     hf_error = None
 
-    if (
-        HF_DATASET_REPO
-        and HF_TOKEN
-    ):
-
+    if HF_DATASET_REPO and HF_TOKEN:
         try:
-
             return _append_hf_jsonl(
-                path_in_repo=
-                    path_in_repo,
-
-                record=
-                    prepared,
-
-                commit_message=
-                    commit_message
+                path_in_repo=path_in_repo,
+                record=prepared,
+                commit_message=commit_message,
             )
-
         except Exception as exc:
+            hf_error = str(exc)
 
-            hf_error = str(
-                exc
-            )
-
-    local_path = (
-        _append_local_jsonl(
-            relative_path=
-                path_in_repo,
-
-            record=
-                prepared
-        )
+    local_path = _append_local_jsonl(
+        relative_path=path_in_repo,
+        record=prepared,
     )
 
     return {
-        "success":
-            True,
-
-        "storage":
-            "local_fallback",
-
-        "path":
-            local_path,
-
-        "hf_error":
-            hf_error,
+        "success": True,
+        "storage": "local_fallback",
+        "path": local_path,
+        "hf_error": hf_error,
     }
 
-
-# ============================================================
-# TOUR-FORECAST AUFBEREITEN
-# ============================================================
 
 def _forecast_run_record(
     forecast: Dict[str, Any]
 ) -> Dict[str, Any]:
-
     segments = (
-        forecast.get(
-            "segments"
-        )
+        forecast.get("segments")
         or []
     )
 
@@ -487,14 +235,12 @@ def _forecast_run_record(
                 "tomtom_traffic_delay_s"
             )
         )
-        for segment
-        in segments
+        for segment in segments
     )
 
     successful_tomtom_segments = sum(
         1
-        for segment
-        in segments
+        for segment in segments
         if bool(
             segment.get(
                 "tomtom_success"
@@ -503,17 +249,13 @@ def _forecast_run_record(
     )
 
     failed_tomtom_segments = (
-        len(
-            segments
-        )
+        len(segments)
         - successful_tomtom_segments
     )
 
     return {
         "tour_id":
-            forecast.get(
-                "tour_id"
-            ),
+            forecast.get("tour_id"),
 
         "forecast_version":
             _safe_int(
@@ -524,14 +266,10 @@ def _forecast_run_record(
             ),
 
         "vehicle_id":
-            forecast.get(
-                "vehicle_id"
-            ),
+            forecast.get("vehicle_id"),
 
         "started_at":
-            forecast.get(
-                "started_at"
-            ),
+            forecast.get("started_at"),
 
         "finished_at_forecast":
             forecast.get(
@@ -558,10 +296,6 @@ def _forecast_run_record(
                     "total_distance_m"
                 )
             ),
-
-        # ====================================================
-        # DIE 5 ZEITKATEGORIEN
-        # ====================================================
 
         "osrm_baseline_s":
             _safe_int(
@@ -598,23 +332,17 @@ def _forecast_run_record(
                 )
             ),
 
-        "actual_travel_s":
-            (
-                _safe_int(
-                    forecast.get(
-                        "actual_travel_s"
-                    )
-                )
-                if forecast.get(
+        "actual_travel_s": (
+            _safe_int(
+                forecast.get(
                     "actual_travel_s"
                 )
-                is not None
-                else None
-            ),
-
-        # ====================================================
-        # SERVICE
-        # ====================================================
+            )
+            if forecast.get(
+                "actual_travel_s"
+            ) is not None
+            else None
+        ),
 
         "planned_service_s":
             _safe_int(
@@ -623,23 +351,17 @@ def _forecast_run_record(
                 )
             ),
 
-        "actual_service_s":
-            (
-                _safe_int(
-                    forecast.get(
-                        "actual_service_s"
-                    )
-                )
-                if forecast.get(
+        "actual_service_s": (
+            _safe_int(
+                forecast.get(
                     "actual_service_s"
                 )
-                is not None
-                else None
-            ),
-
-        # ====================================================
-        # VERKEHR
-        # ====================================================
+            )
+            if forecast.get(
+                "actual_service_s"
+            ) is not None
+            else None
+        ),
 
         "tomtom_traffic_delay_s":
             traffic_delay_s,
@@ -649,10 +371,6 @@ def _forecast_run_record(
 
         "tomtom_segments_failed":
             failed_tomtom_segments,
-
-        # ====================================================
-        # REFORECAST
-        # ====================================================
 
         "recalculated":
             bool(
@@ -671,20 +389,13 @@ def _forecast_run_record(
     }
 
 
-# ============================================================
-# SEGMENT AUFBEREITEN
-# ============================================================
-
 def _segment_record(
     forecast: Dict[str, Any],
     segment: Dict[str, Any]
 ) -> Dict[str, Any]:
-
     return {
         "tour_id":
-            forecast.get(
-                "tour_id"
-            ),
+            forecast.get("tour_id"),
 
         "forecast_version":
             _safe_int(
@@ -695,9 +406,7 @@ def _segment_record(
             ),
 
         "vehicle_id":
-            forecast.get(
-                "vehicle_id"
-            ),
+            forecast.get("vehicle_id"),
 
         "segment_id":
             _safe_int(
@@ -705,10 +414,6 @@ def _segment_record(
                     "segment_id"
                 )
             ),
-
-        # ====================================================
-        # VON / NACH
-        # ====================================================
 
         "from_stop_id":
             segment.get(
@@ -758,10 +463,6 @@ def _segment_record(
                 )
             ),
 
-        # ====================================================
-        # ZEITPUNKTE
-        # ====================================================
-
         "departure_time":
             segment.get(
                 "departure_time"
@@ -771,10 +472,6 @@ def _segment_record(
             segment.get(
                 "arrival_time_forecast"
             ),
-
-        # ====================================================
-        # 5 ZEITKATEGORIEN
-        # ====================================================
 
         "osrm_baseline_s":
             _safe_int(
@@ -811,23 +508,17 @@ def _segment_record(
                 )
             ),
 
-        "actual_travel_s":
-            (
-                _safe_int(
-                    segment.get(
-                        "actual_travel_s"
-                    )
-                )
-                if segment.get(
+        "actual_travel_s": (
+            _safe_int(
+                segment.get(
                     "actual_travel_s"
                 )
-                is not None
-                else None
-            ),
-
-        # ====================================================
-        # TOMTOM
-        # ====================================================
+            )
+            if segment.get(
+                "actual_travel_s"
+            ) is not None
+            else None
+        ),
 
         "tomtom_distance_m":
             _safe_float(
@@ -862,10 +553,6 @@ def _segment_record(
                 "tomtom_error"
             ),
 
-        # ====================================================
-        # SERVICE
-        # ====================================================
-
         "planned_service_s":
             _safe_int(
                 segment.get(
@@ -873,23 +560,17 @@ def _segment_record(
                 )
             ),
 
-        "actual_service_s":
-            (
-                _safe_int(
-                    segment.get(
-                        "actual_service_s"
-                    )
-                )
-                if segment.get(
+        "actual_service_s": (
+            _safe_int(
+                segment.get(
                     "actual_service_s"
                 )
-                is not None
-                else None
-            ),
-
-        # ====================================================
-        # INCIDENTS
-        # ====================================================
+            )
+            if segment.get(
+                "actual_service_s"
+            ) is not None
+            else None
+        ),
 
         "incident_count":
             _safe_int(
@@ -897,10 +578,6 @@ def _segment_record(
                     "incident_count"
                 )
             ),
-
-        # ====================================================
-        # REFORECAST
-        # ====================================================
 
         "recalculated":
             bool(
@@ -919,25 +596,10 @@ def _segment_record(
     }
 
 
-# ============================================================
-# FORECAST KOMPLETT SPEICHERN
-# ============================================================
-
 def log_forecast(
     forecast: Dict[str, Any]
 ) -> Dict[str, Any]:
-    """
-    Speichert:
-
-    1. eine Zeile pro Tour-Forecast
-    2. eine Zeile pro Segment
-
-    Jede Neuberechnung erhält dieselbe tour_id,
-    aber eine neue forecast_version.
-    """
-
     if not forecast:
-
         raise ValueError(
             "Forecast ist leer."
         )
@@ -950,7 +612,6 @@ def log_forecast(
     )
 
     if not tour_id:
-
         raise ValueError(
             "Forecast enthält keine tour_id."
         )
@@ -962,34 +623,18 @@ def log_forecast(
         1
     )
 
-    # ========================================================
-    # TOUR SPEICHERN
-    # ========================================================
-
-    tour_record = (
-        _forecast_run_record(
-            forecast
-        )
+    tour_record = _forecast_run_record(
+        forecast
     )
 
-    tour_result = (
-        append_record(
-            path_in_repo=
-                FORECAST_RUNS_FILE,
-
-            record=
-                tour_record,
-
-            commit_message=(
-                f"Forecast {tour_id} "
-                f"Version {version}"
-            ),
-        )
+    tour_result = append_record(
+        path_in_repo=FORECAST_RUNS_FILE,
+        record=tour_record,
+        commit_message=(
+            f"Forecast {tour_id} "
+            f"Version {version}"
+        ),
     )
-
-    # ========================================================
-    # SEGMENTE SPEICHERN
-    # ========================================================
 
     segment_results = []
 
@@ -999,20 +644,277 @@ def log_forecast(
         )
         or []
     ):
-
-        segment_record = (
-            _segment_record(
-                forecast=
-                    forecast,
-
-                segment=
-                    segment
-            )
+        segment_record = _segment_record(
+            forecast=forecast,
+            segment=segment,
         )
 
-        result = (
-            append_record(
-                path_in_repo=
-                    SEGMENTS_FILE,
+        result = append_record(
+            path_in_repo=SEGMENTS_FILE,
+            record=segment_record,
+            commit_message=(
+                f"Segment Forecast "
+                f"{tour_id} "
+                f"V{version} "
+                f"S{segment_record['segment_id']}"
+            ),
+        )
 
-          
+        segment_results.append(
+            result
+        )
+
+    return {
+        "success": True,
+        "tour_id": tour_id,
+        "forecast_version": version,
+        "tour_storage": tour_result,
+        "segments_written": len(
+            segment_results
+        ),
+        "segment_storage": segment_results,
+    }
+
+
+def log_actual_tour(
+    actual: Dict[str, Any]
+) -> Dict[str, Any]:
+    if not actual:
+        raise ValueError(
+            "IST-Daten sind leer."
+        )
+
+    tour_id = str(
+        actual.get(
+            "tour_id"
+        )
+        or ""
+    )
+
+    if not tour_id:
+        raise ValueError(
+            "IST-Daten enthalten keine tour_id."
+        )
+
+    record = {
+        "tour_id":
+            tour_id,
+
+        "vehicle_id":
+            actual.get(
+                "vehicle_id"
+            ),
+
+        "actual_departure":
+            actual.get(
+                "actual_departure"
+            ),
+
+        "actual_arrival":
+            actual.get(
+                "actual_arrival"
+            ),
+
+        "actual_travel_s": (
+            _safe_int(
+                actual.get(
+                    "actual_travel_s"
+                )
+            )
+            if actual.get(
+                "actual_travel_s"
+            ) is not None
+            else None
+        ),
+
+        "actual_service_s": (
+            _safe_int(
+                actual.get(
+                    "actual_service_s"
+                )
+            )
+            if actual.get(
+                "actual_service_s"
+            ) is not None
+            else None
+        ),
+
+        "actual_distance_m": (
+            _safe_float(
+                actual.get(
+                    "actual_distance_m"
+                )
+            )
+            if actual.get(
+                "actual_distance_m"
+            ) is not None
+            else None
+        ),
+
+        "logged_at":
+            _utc_now(),
+    }
+
+    return append_record(
+        path_in_repo=ACTUAL_TOURS_FILE,
+        record=record,
+        commit_message=(
+            f"IST Tour {tour_id}"
+        ),
+    )
+
+
+def log_actual_segment(
+    actual: Dict[str, Any]
+) -> Dict[str, Any]:
+    if not actual:
+        raise ValueError(
+            "IST-Segmentdaten sind leer."
+        )
+
+    tour_id = str(
+        actual.get(
+            "tour_id"
+        )
+        or ""
+    )
+
+    if not tour_id:
+        raise ValueError(
+            "IST-Segment enthält keine tour_id."
+        )
+
+    segment_id = _safe_int(
+        actual.get(
+            "segment_id"
+        )
+    )
+
+    record = {
+        "tour_id":
+            tour_id,
+
+        "vehicle_id":
+            actual.get(
+                "vehicle_id"
+            ),
+
+        "segment_id":
+            segment_id,
+
+        "from_stop_id":
+            actual.get(
+                "from_stop_id"
+            ),
+
+        "to_stop_id":
+            actual.get(
+                "to_stop_id"
+            ),
+
+        "actual_departure":
+            actual.get(
+                "actual_departure"
+            ),
+
+        "actual_arrival":
+            actual.get(
+                "actual_arrival"
+            ),
+
+        "actual_travel_s": (
+            _safe_int(
+                actual.get(
+                    "actual_travel_s"
+                )
+            )
+            if actual.get(
+                "actual_travel_s"
+            ) is not None
+            else None
+        ),
+
+        "actual_service_s": (
+            _safe_int(
+                actual.get(
+                    "actual_service_s"
+                )
+            )
+            if actual.get(
+                "actual_service_s"
+            ) is not None
+            else None
+        ),
+
+        "actual_distance_m": (
+            _safe_float(
+                actual.get(
+                    "actual_distance_m"
+                )
+            )
+            if actual.get(
+                "actual_distance_m"
+            ) is not None
+            else None
+        ),
+
+        "logged_at":
+            _utc_now(),
+    }
+
+    return append_record(
+        path_in_repo=ACTUAL_SEGMENTS_FILE,
+        record=record,
+        commit_message=(
+            f"IST Segment "
+            f"{tour_id} "
+            f"S{segment_id}"
+        ),
+    )
+
+
+def training_logger_status() -> Dict[str, Any]:
+    return {
+        "hf_dataset_repo":
+            HF_DATASET_REPO
+            or None,
+
+        "hf_token_configured":
+            bool(HF_TOKEN),
+
+        "dataset_configured":
+            bool(HF_DATASET_REPO),
+
+        "remote_logging_ready":
+            bool(
+                HF_TOKEN
+                and HF_DATASET_REPO
+            ),
+
+        "local_fallback_directory":
+            str(LOCAL_DATA_DIR),
+
+        "files": {
+            "forecast_runs":
+                FORECAST_RUNS_FILE,
+
+            "forecast_segments":
+                SEGMENTS_FILE,
+
+            "actual_tours":
+                ACTUAL_TOURS_FILE,
+
+            "actual_segments":
+                ACTUAL_SEGMENTS_FILE,
+        },
+    }
+
+
+if __name__ == "__main__":
+    print(
+        json.dumps(
+            training_logger_status(),
+            indent=2,
+            ensure_ascii=False
+        )
+    )
