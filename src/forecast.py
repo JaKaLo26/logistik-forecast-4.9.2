@@ -1,8 +1,14 @@
 # src/forecast.py
+# Logistik Forecast 4.9.5
+# Reforecast-Fix:
+# - IST-Servicezeit am gewählten Stopp wird korrekt übernommen
+# - neue Abfahrtszeit kann den Reforecast direkt setzen
+# - nur zukünftige Segmente werden neu berechnet
+# - Tour-Gesamtzeit nutzt bekannte IST-Servicezeiten + geplante Rest-Servicezeiten
 
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -15,11 +21,9 @@ from src.tomtom_routing import TomTomRoutingProvider
 
 @dataclass
 class SegmentForecast:
-
     tour_id: str
     forecast_version: int
     vehicle_id: str
-
     segment_id: int
 
     from_stop_id: str
@@ -44,7 +48,6 @@ class SegmentForecast:
     tomtom_live_s: int
 
     model_forecast_s: int
-
     actual_travel_s: Optional[int]
 
     tomtom_traffic_delay_s: int
@@ -54,7 +57,6 @@ class SegmentForecast:
     actual_service_s: Optional[int]
 
     incident_count: int
-
     data_confidence: float
 
     recalculated: bool
@@ -69,7 +71,6 @@ class SegmentForecast:
 
 @dataclass
 class TourForecast:
-
     tour_id: str
     forecast_version: int
     vehicle_id: str
@@ -78,11 +79,12 @@ class TourForecast:
     finished_at_forecast: str
 
     osrm_baseline_s: int
+
     tomtom_no_traffic_s: int
     tomtom_historic_s: int
     tomtom_live_s: int
-    model_forecast_s: int
 
+    model_forecast_s: int
     actual_travel_s: Optional[int]
 
     planned_service_s: int
@@ -169,7 +171,8 @@ def _parse_datetime(
     else:
 
         text = str(
-            value or ""
+            value
+            or ""
         ).strip()
 
         if not text:
@@ -272,11 +275,16 @@ def _stop_coordinate(
 
     return (
         float(
-            stop["lat"]
+            stop[
+                "lat"
+            ]
         ),
+
         float(
-            stop["lon"]
-        )
+            stop[
+                "lon"
+            ]
+        ),
     )
 
 
@@ -319,9 +327,11 @@ def _planned_service_s(
     return max(
         0,
         _safe_int(
-            stop.get(
-                "service_min",
-                0
+            _safe_float(
+                stop.get(
+                    "service_min",
+                    0
+                )
             )
             * 60
         )
@@ -358,14 +368,53 @@ def _actual_service_s(
         return max(
             0,
             _safe_int(
-                stop.get(
-                    "actual_service_min"
+                _safe_float(
+                    stop.get(
+                        "actual_service_min"
+                    )
                 )
                 * 60
             )
         )
 
     return None
+
+
+def _effective_service_s(
+    segment: Dict[str, Any]
+) -> int:
+    """
+    Für die aktuelle Zeitachse gilt:
+
+    bekannte IST-Servicezeit
+    vor
+    geplanter Servicezeit.
+    """
+
+    if (
+        segment.get(
+            "actual_service_s"
+        )
+        is not None
+    ):
+
+        return max(
+            0,
+            _safe_int(
+                segment.get(
+                    "actual_service_s"
+                )
+            )
+        )
+
+    return max(
+        0,
+        _safe_int(
+            segment.get(
+                "planned_service_s"
+            )
+        )
+    )
 
 
 # ============================================================
@@ -380,14 +429,18 @@ def calculate_model_forecast_s(
     confidence: float = 1.0,
 ) -> int:
     """
-    Vorläufige Forecast-Logik vor dem eigentlichen ML-Modell.
+    Übergangslogik bis zum trainierten ML-Modell.
 
-    Ziel:
-    - Live-Verkehr stark gewichten
-    - Historische Verkehrslage stabilisierend verwenden
-    - OSRM als Baseline/Fallback behalten
+    Gewichtung:
 
-    Später wird diese Funktion durch das trainierte Modell ersetzt.
+    TomTom Live
+        stärkster Faktor
+
+    TomTom Historisch
+        stabilisierender Faktor
+
+    OSRM
+        Baseline/Fallback
     """
 
     osrm_baseline_s = max(
@@ -424,7 +477,7 @@ def calculate_model_forecast_s(
             1.0
         ),
         0.0,
-        1.0
+        1.0,
     )
 
     # --------------------------------------------------------
@@ -434,34 +487,35 @@ def calculate_model_forecast_s(
     if live_s <= 0:
 
         if historic_s > 0:
+
             live_s = historic_s
 
         else:
+
             live_s = osrm_baseline_s
 
     if historic_s <= 0:
+
         historic_s = (
             osrm_baseline_s
             or live_s
         )
 
     if osrm_baseline_s <= 0:
+
         osrm_baseline_s = (
             historic_s
             or live_s
         )
 
     # --------------------------------------------------------
-    # HEURISTISCHER FORECAST
-    #
-    # Live = wichtigster Faktor
-    # Historie = Stabilisierung
-    # OSRM = Basisreferenz
+    # GEWICHTUNG
     # --------------------------------------------------------
 
     live_weight = (
         0.50
-        + (
+        +
+        (
             0.20
             * confidence
         )
@@ -486,10 +540,10 @@ def calculate_model_forecast_s(
         * osrm_weight
     )
 
-    # TomTom Live sollte grundsätzlich bereits Delay enthalten.
-    # Deshalb wird traffic_delay_s NICHT zusätzlich vollständig addiert.
+    # TomTom Live enthält Verkehrsverzögerungen bereits.
+    # Deshalb KEIN vollständiges zusätzliches Addieren.
     #
-    # Nur eine kleine Sicherheitskorrektur bei deutlichem Delay.
+    # Nur kleine Sicherheitskorrektur.
     if traffic_delay_s > 0:
 
         forecast_s += (
@@ -516,14 +570,12 @@ def extract_osrm_leg_baselines(
     expected_segments: int
 ) -> List[int]:
     """
-    Extrahiert OSRM-Leg-Dauern.
+    Erwartete Segmente:
 
-    Erwartete Segmente bei Rundtour:
-
-        Depot -> Stopp 1
-        Stopp 1 -> Stopp 2
-        ...
-        letzter Stopp -> Depot
+    Depot -> Stopp 1
+    Stopp 1 -> Stopp 2
+    ...
+    letzter Stopp -> Depot
     """
 
     legs = (
@@ -533,31 +585,32 @@ def extract_osrm_leg_baselines(
         or []
     )
 
-    durations = []
+    durations = [
 
-    for leg in legs:
-
-        durations.append(
-            max(
-                0,
-                _safe_int(
-                    leg.get(
-                        "duration"
-                    )
+        max(
+            0,
+            _safe_int(
+                leg.get(
+                    "duration"
                 )
             )
         )
 
+        for leg
+        in legs
+    ]
+
     if (
-        len(durations)
+        len(
+            durations
+        )
         == expected_segments
     ):
 
         return durations
 
     # --------------------------------------------------------
-    # FALLBACK:
-    # Gesamtzeit gleichmäßig verteilen
+    # FALLBACK
     # --------------------------------------------------------
 
     total_duration = max(
@@ -576,7 +629,9 @@ def extract_osrm_leg_baselines(
     if total_duration <= 0:
 
         return [
+
             0
+
             for _
             in range(
                 expected_segments
@@ -589,18 +644,19 @@ def extract_osrm_leg_baselines(
     )
 
     result = [
+
         int(
             round(
                 average
             )
         )
+
         for _
         in range(
             expected_segments
         )
     ]
 
-    # Rundungsdifferenz korrigieren.
     difference = (
         total_duration
         - sum(
@@ -610,7 +666,9 @@ def extract_osrm_leg_baselines(
 
     if result:
 
-        result[-1] += difference
+        result[
+            -1
+        ] += difference
 
     return result
 
@@ -640,9 +698,14 @@ def calculate_segment_forecast(
     ] = None,
 
     recalculated: bool = False,
-    recalculation_from_stop: Optional[str] = None,
 
-    actual_travel_s: Optional[int] = None,
+    recalculation_from_stop: Optional[
+        str
+    ] = None,
+
+    actual_travel_s: Optional[
+        int
+    ] = None,
 
 ) -> SegmentForecast:
 
@@ -663,8 +726,13 @@ def calculate_segment_forecast(
         )
     )
 
+    # --------------------------------------------------------
+    # TOMTOM SEGMENT
+    # --------------------------------------------------------
+
     tomtom = (
         provider.calculate_segment(
+
             origin=
                 origin_coord,
 
@@ -679,7 +747,7 @@ def calculate_segment_forecast(
     )
 
     # --------------------------------------------------------
-    # TOMTOM FEHLERFALL
+    # TOMTOM OK
     # --------------------------------------------------------
 
     if tomtom.success:
@@ -709,11 +777,11 @@ def calculate_segment_forecast(
             tomtom.distance_m
         )
 
-        # Routing API liefert aktuell kein explizites
-        # Confidence-Feld.
-        #
-        # Erfolgreiche vollständige Routing-Antwort:
         confidence = 1.0
+
+    # --------------------------------------------------------
+    # TOMTOM FALLBACK
+    # --------------------------------------------------------
 
     else:
 
@@ -733,15 +801,18 @@ def calculate_segment_forecast(
         )
 
         traffic_delay_s = 0
+
         distance_m = 0.0
+
         confidence = 0.0
 
     # --------------------------------------------------------
-    # EIGENER FORECAST
+    # MODELL-FORECAST
     # --------------------------------------------------------
 
     model_forecast_s = (
         calculate_model_forecast_s(
+
             osrm_baseline_s=
                 osrm_baseline_s,
 
@@ -755,19 +826,19 @@ def calculate_segment_forecast(
                 traffic_delay_s,
 
             confidence=
-                confidence
+                confidence,
         )
     )
 
     arrival = (
         departure_time
-        + timedelta(
+        +
+        timedelta(
             seconds=
                 model_forecast_s
         )
     )
 
-    # Servicezeit gehört immer zum Zielstopp.
     planned_service_s = (
         _planned_service_s(
             destination_stop
@@ -781,6 +852,7 @@ def calculate_segment_forecast(
     )
 
     return SegmentForecast(
+
         tour_id=
             str(
                 tour_id
@@ -827,22 +899,30 @@ def calculate_segment_forecast(
 
         from_lat=
             float(
-                origin_coord[0]
+                origin_coord[
+                    0
+                ]
             ),
 
         from_lon=
             float(
-                origin_coord[1]
+                origin_coord[
+                    1
+                ]
             ),
 
         to_lat=
             float(
-                destination_coord[0]
+                destination_coord[
+                    0
+                ]
             ),
 
         to_lon=
             float(
-                destination_coord[1]
+                destination_coord[
+                    1
+                ]
             ),
 
         departure_time=
@@ -951,25 +1031,53 @@ def calculate_tour_forecast(
             Dict[str, Any]
         ]
     ] = None,
+
+    recalculation_departure_time: Optional[
+        Any
+    ] = None,
+
 ) -> Dict[str, Any]:
     """
-    Berechnet eine komplette Rundtour segmentweise.
+    Kompletten Tour-Forecast segmentweise berechnen.
 
-    Ablauf:
+    Normal:
 
-        Depot -> Stopp 1
-        Service 1
+    Depot -> Stopp 1
+    Service Stopp 1
 
-        Stopp 1 -> Stopp 2
-        Service 2
+    Stopp 1 -> Stopp 2
+    Service Stopp 2
 
-        ...
+    ...
 
-        letzter Stopp -> Depot
+    letzter Stopp -> Depot
 
-    Bei recalculation_from_stop werden bereits gefahrene
-    Segmente aus previous_segments übernommen und nur die
-    zukünftigen Segmente neu berechnet.
+
+    Reforecast ab Stopp 3:
+
+    Depot -> 1
+        bleibt
+
+    1 -> 2
+        bleibt
+
+    2 -> 3
+        bleibt
+
+    Service an Stopp 3
+        wird mit IST-Service überschrieben,
+        falls vorhanden
+
+    3 -> 4
+        NEU
+
+    4 -> 5
+        NEU
+
+    ...
+
+    letzter Stopp -> Depot
+        NEU
     """
 
     vehicle_id = str(
@@ -982,7 +1090,9 @@ def calculate_tour_forecast(
     if not tour_id:
 
         tour_id = (
+
             f"{vehicle_id}-"
+
             f"{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
         )
 
@@ -994,15 +1104,21 @@ def calculate_tour_forecast(
 
     provider = (
         TomTomRoutingProvider(
-            api_key=api_key,
-            timeout=timeout
+
+            api_key=
+                api_key,
+
+            timeout=
+                timeout,
         )
     )
 
     stops = [
+
         dict(
             stop
         )
+
         for stop
         in (
             route.get(
@@ -1019,6 +1135,7 @@ def calculate_tour_forecast(
         )
 
     depot_stop = {
+
         "auftrag":
             "DEPOT",
 
@@ -1043,30 +1160,46 @@ def calculate_tour_forecast(
             0,
     }
 
-    # --------------------------------------------------------
+    # ========================================================
     # SEGMENTKETTE
-    # --------------------------------------------------------
+    # ========================================================
 
     points = (
-        [depot_stop]
-        + stops
-        + [depot_stop]
+
+        [
+            depot_stop
+        ]
+
+        +
+        stops
+
+        +
+        [
+            depot_stop
+        ]
     )
 
     segment_count = (
-        len(points)
+        len(
+            points
+        )
         - 1
     )
 
     osrm_leg_times = (
         extract_osrm_leg_baselines(
+
             route=
                 route,
 
             expected_segments=
-                segment_count
+                segment_count,
         )
     )
+
+    # ========================================================
+    # VORHERIGE SEGMENTE
+    # ========================================================
 
     previous_map: Dict[
         int,
@@ -1095,15 +1228,22 @@ def calculate_tour_forecast(
                 item
             )
 
-    # --------------------------------------------------------
-    # REFORECAST-GRENZE SUCHEN
-    # --------------------------------------------------------
+    # ========================================================
+    # REFORECAST STOPP SUCHEN
+    # ========================================================
 
     recalc_stop_index: Optional[
         int
     ] = None
 
-    if recalculation_from_stop:
+    recalc_stop: Optional[
+        Dict[str, Any]
+    ] = None
+
+    if (
+        recalculation_from_stop
+        is not None
+    ):
 
         target = str(
             recalculation_from_stop
@@ -1124,7 +1264,42 @@ def calculate_tour_forecast(
             ):
 
                 recalc_stop_index = idx
+
+                recalc_stop = stop
+
                 break
+
+        if (
+            recalc_stop_index
+            is None
+        ):
+
+            raise ValueError(
+                f"Reforecast-Stopp "
+                f"{recalculation_from_stop} "
+                f"wurde nicht gefunden."
+            )
+
+    # ========================================================
+    # NEUE ABFAHRT
+    # ========================================================
+
+    forced_departure = None
+
+    if (
+        recalculation_departure_time
+        is not None
+    ):
+
+        forced_departure = (
+            _parse_datetime(
+                recalculation_departure_time
+            )
+        )
+
+    # ========================================================
+    # BERECHNUNG
+    # ========================================================
 
     segments: List[
         Dict[str, Any]
@@ -1134,5 +1309,1445 @@ def calculate_tour_forecast(
         start_dt
     )
 
-    # --------------------------------------------------------
-    # ALLE SEGMENTE
+    for segment_index in range(
+        segment_count
+    ):
+
+        segment_id = (
+            segment_index
+            + 1
+        )
+
+        origin = (
+            points[
+                segment_index
+            ]
+        )
+
+        destination = (
+            points[
+                segment_index
+                + 1
+            ]
+        )
+
+        # ====================================================
+        # ENTSCHEIDUNG:
+        # ALTES SEGMENT ODER NEU BERECHNEN
+        # ====================================================
+
+        reuse_previous = False
+
+        if (
+            recalc_stop_index
+            is not None
+        ):
+
+            # Beispiel:
+            #
+            # Reforecast ab Stopp 3
+            #
+            # Segmentindex:
+            #
+            # 0 Depot -> 1
+            # 1 1 -> 2
+            # 2 2 -> 3
+            # 3 3 -> 4
+            #
+            # Neu ab Index 3.
+
+            first_new_segment_index = (
+                recalc_stop_index
+                + 1
+            )
+
+            if (
+                segment_index
+                < first_new_segment_index
+
+                and
+
+                segment_id
+                in previous_map
+            ):
+
+                reuse_previous = True
+
+        # ====================================================
+        # ALTES SEGMENT ÜBERNEHMEN
+        # ====================================================
+
+        if reuse_previous:
+
+            old = dict(
+                previous_map[
+                    segment_id
+                ]
+            )
+
+            departure = (
+                _parse_datetime(
+                    old.get(
+                        "departure_time",
+                        current_time
+                    )
+                )
+            )
+
+            actual_travel = (
+                old.get(
+                    "actual_travel_s"
+                )
+            )
+
+            if (
+                actual_travel
+                is not None
+            ):
+
+                travel_s = max(
+                    0,
+                    _safe_int(
+                        actual_travel
+                    )
+                )
+
+            else:
+
+                travel_s = max(
+                    0,
+                    _safe_int(
+                        old.get(
+                            "model_forecast_s"
+                        )
+                    )
+                )
+
+            arrival_time = (
+                departure
+                +
+                timedelta(
+                    seconds=
+                        travel_s
+                )
+            )
+
+            # =================================================
+            # REFORECAST-GRENZE
+            # =================================================
+
+            is_boundary_segment = (
+
+                recalc_stop_index
+                is not None
+
+                and
+
+                segment_index
+                == recalc_stop_index
+            )
+
+            if (
+                is_boundary_segment
+                and
+                recalc_stop
+                is not None
+            ):
+
+                # ---------------------------------------------
+                # IST SERVICEZEIT DES GEWÄHLTEN STOPPS
+                # ---------------------------------------------
+
+                updated_actual_service = (
+                    _actual_service_s(
+                        recalc_stop
+                    )
+                )
+
+                if (
+                    updated_actual_service
+                    is not None
+                ):
+
+                    old[
+                        "actual_service_s"
+                    ] = (
+                        updated_actual_service
+                    )
+
+                # ---------------------------------------------
+                # ALTES SEGMENT ERST JETZT SPEICHERN
+                # ---------------------------------------------
+
+                segments.append(
+                    old
+                )
+
+                # ---------------------------------------------
+                # NEUE ABFAHRT EXPLIZIT GESETZT
+                # ---------------------------------------------
+
+                if (
+                    forced_departure
+                    is not None
+                ):
+
+                    if (
+                        forced_departure
+                        < arrival_time
+                    ):
+
+                        raise ValueError(
+                            "Die neue Abfahrtszeit liegt "
+                            "vor der Ankunftszeit am "
+                            "Reforecast-Stopp."
+                        )
+
+                    current_time = (
+                        forced_departure
+                    )
+
+                    continue
+
+                # ---------------------------------------------
+                # SONST:
+                # ANKUNFT + IST/PLAN-SERVICE
+                # ---------------------------------------------
+
+                current_time = (
+
+                    arrival_time
+
+                    +
+
+                    timedelta(
+                        seconds=
+                            _effective_service_s(
+                                old
+                            )
+                    )
+                )
+
+                continue
+
+            # =================================================
+            # NORMALES ALTES SEGMENT
+            # =================================================
+
+            segments.append(
+                old
+            )
+
+            current_time = (
+
+                arrival_time
+
+                +
+
+                timedelta(
+                    seconds=
+                        _effective_service_s(
+                            old
+                        )
+                )
+            )
+
+            continue
+
+        # ====================================================
+        # ZUKÜNFTIGES SEGMENT NEU BERECHNEN
+        # ====================================================
+
+        segment = (
+            calculate_segment_forecast(
+
+                tour_id=
+                    tour_id,
+
+                forecast_version=
+                    forecast_version,
+
+                vehicle_id=
+                    vehicle_id,
+
+                segment_id=
+                    segment_id,
+
+                origin_stop=
+                    origin,
+
+                destination_stop=
+                    destination,
+
+                departure_time=
+                    current_time,
+
+                osrm_baseline_s=
+                    osrm_leg_times[
+                        segment_index
+                    ],
+
+                provider=
+                    provider,
+
+                vehicle_parameters=
+                    vehicle_parameters,
+
+                recalculated=(
+                    recalc_stop_index
+                    is not None
+                ),
+
+                recalculation_from_stop=
+                    recalculation_from_stop,
+            )
+        )
+
+        segment_dict = (
+            segment.to_dict()
+        )
+
+        segments.append(
+            segment_dict
+        )
+
+        # ----------------------------------------------------
+        # ANKUNFT
+        # ----------------------------------------------------
+
+        current_time += timedelta(
+
+            seconds=
+                segment.model_forecast_s
+        )
+
+        # ----------------------------------------------------
+        # SERVICE AM ZIELSTOPP
+        # ----------------------------------------------------
+
+        current_time += timedelta(
+
+            seconds=
+                _effective_service_s(
+                    segment_dict
+                )
+        )
+
+    # ========================================================
+    # TOURSUMMEN
+    # ========================================================
+
+    osrm_baseline_s = sum(
+
+        _safe_int(
+            segment.get(
+                "osrm_baseline_s"
+            )
+        )
+
+        for segment
+        in segments
+    )
+
+    no_traffic_s = sum(
+
+        _safe_int(
+            segment.get(
+                "tomtom_no_traffic_s"
+            )
+        )
+
+        for segment
+        in segments
+    )
+
+    historic_s = sum(
+
+        _safe_int(
+            segment.get(
+                "tomtom_historic_s"
+            )
+        )
+
+        for segment
+        in segments
+    )
+
+    live_s = sum(
+
+        _safe_int(
+            segment.get(
+                "tomtom_live_s"
+            )
+        )
+
+        for segment
+        in segments
+    )
+
+    model_forecast_s = sum(
+
+        _safe_int(
+            segment.get(
+                "model_forecast_s"
+            )
+        )
+
+        for segment
+        in segments
+    )
+
+    planned_service_s = sum(
+
+        _safe_int(
+            segment.get(
+                "planned_service_s"
+            )
+        )
+
+        for segment
+        in segments
+    )
+
+    # ========================================================
+    # BEKANNTE IST SERVICEZEITEN
+    # ========================================================
+
+    actual_service_values = [
+
+        segment.get(
+            "actual_service_s"
+        )
+
+        for segment
+        in segments
+
+        if (
+            segment.get(
+                "actual_service_s"
+            )
+            is not None
+        )
+    ]
+
+    actual_service_s = (
+
+        sum(
+
+            _safe_int(
+                value
+            )
+
+            for value
+            in actual_service_values
+        )
+
+        if actual_service_values
+
+        else None
+    )
+
+    # ========================================================
+    # IST FAHRZEIT
+    # ========================================================
+
+    actual_travel_values = [
+
+        segment.get(
+            "actual_travel_s"
+        )
+
+        for segment
+        in segments
+
+        if (
+            segment.get(
+                "actual_travel_s"
+            )
+            is not None
+        )
+    ]
+
+    actual_travel_s = (
+
+        sum(
+
+            _safe_int(
+                value
+            )
+
+            for value
+            in actual_travel_values
+        )
+
+        if (
+            len(
+                actual_travel_values
+            )
+            ==
+            len(
+                segments
+            )
+        )
+
+        else None
+    )
+
+    # ========================================================
+    # DISTANZ
+    # ========================================================
+
+    total_distance_m = sum(
+
+        _safe_float(
+            segment.get(
+                "tomtom_distance_m"
+            )
+        )
+
+        for segment
+        in segments
+    )
+
+    if (
+        total_distance_m
+        <= 0
+    ):
+
+        total_distance_m = (
+            _safe_float(
+                route.get(
+                    "distance_m"
+                )
+            )
+        )
+
+    # ========================================================
+    # TOUR
+    # ========================================================
+
+    tour = TourForecast(
+
+        tour_id=
+            str(
+                tour_id
+            ),
+
+        forecast_version=
+            int(
+                forecast_version
+            ),
+
+        vehicle_id=
+            vehicle_id,
+
+        started_at=
+            _iso(
+                start_dt
+            ),
+
+        finished_at_forecast=
+            _iso(
+                current_time
+            ),
+
+        osrm_baseline_s=
+            osrm_baseline_s,
+
+        tomtom_no_traffic_s=
+            no_traffic_s,
+
+        tomtom_historic_s=
+            historic_s,
+
+        tomtom_live_s=
+            live_s,
+
+        model_forecast_s=
+            model_forecast_s,
+
+        actual_travel_s=
+            actual_travel_s,
+
+        planned_service_s=
+            planned_service_s,
+
+        actual_service_s=
+            actual_service_s,
+
+        total_distance_m=
+            total_distance_m,
+
+        segment_count=
+            len(
+                segments
+            ),
+
+        stop_count=
+            len(
+                stops
+            ),
+
+        recalculated=(
+            recalc_stop_index
+            is not None
+        ),
+
+        recalculation_from_stop=
+            recalculation_from_stop,
+
+        segments=
+            segments,
+    )
+
+    return (
+        tour.to_dict()
+    )
+
+
+# ============================================================
+# REFORECAST AB STOPP
+# ============================================================
+
+def recalculate_tour_from_stop(
+    previous_forecast: Dict[str, Any],
+    route: Dict[str, Any],
+    depot: Dict[str, Any],
+
+    from_stop_id: str,
+
+    new_departure_time: Optional[
+        Any
+    ] = None,
+
+    actual_service_s: Optional[
+        int
+    ] = None,
+
+    api_key: Optional[str] = None,
+    timeout: int = 20,
+
+    vehicle_parameters: Optional[
+        Dict[str, Any]
+    ] = None,
+
+) -> Dict[str, Any]:
+    """
+    Neuberechnung ab einem gewählten Stopp.
+
+    Beispiel:
+
+    Forecast V1
+
+    Depot -> 1
+    1 -> 2
+    2 -> 3
+    3 -> 4
+    4 -> Depot
+
+
+    Reforecast ab Stopp 3
+
+    Depot -> 1
+        bleibt
+
+    1 -> 2
+        bleibt
+
+    2 -> 3
+        bleibt
+
+    Service Stopp 3
+        IST-Wert wird übernommen
+
+    3 -> 4
+        neu
+
+    4 -> Depot
+        neu
+
+
+    Optional:
+
+    new_departure_time
+
+    setzt die tatsächliche Abfahrt am gewählten Stopp
+    direkt.
+    """
+
+    if not previous_forecast:
+
+        raise ValueError(
+            "Vorheriger Forecast fehlt."
+        )
+
+    old_segments = [
+
+        dict(
+            segment
+        )
+
+        for segment
+        in (
+            previous_forecast.get(
+                "segments"
+            )
+            or []
+        )
+    ]
+
+    previous_version = (
+        _safe_int(
+            previous_forecast.get(
+                "forecast_version"
+            ),
+            1
+        )
+    )
+
+    new_version = (
+        previous_version
+        + 1
+    )
+
+    tour_id = str(
+        previous_forecast.get(
+            "tour_id"
+        )
+        or ""
+    )
+
+    if not tour_id:
+
+        raise ValueError(
+            "Vorheriger Forecast enthält "
+            "keine tour_id."
+        )
+
+    # ========================================================
+    # ROUTE KOPIEREN
+    # ========================================================
+
+    route_copy = dict(
+        route
+    )
+
+    route_copy[
+        "stops"
+    ] = [
+
+        dict(
+            stop
+        )
+
+        for stop
+        in (
+            route.get(
+                "stops"
+            )
+            or []
+        )
+    ]
+
+    # ========================================================
+    # GEWÄHLTEN STOPP SUCHEN
+    # ========================================================
+
+    target_stop: Optional[
+        Dict[str, Any]
+    ] = None
+
+    for stop in (
+        route_copy[
+            "stops"
+        ]
+    ):
+
+        if (
+            _stop_id(
+                stop,
+                ""
+            )
+            ==
+            str(
+                from_stop_id
+            )
+        ):
+
+            target_stop = stop
+
+            break
+
+    if (
+        target_stop
+        is None
+    ):
+
+        raise ValueError(
+            f"Stopp {from_stop_id} "
+            f"wurde in der Route "
+            f"nicht gefunden."
+        )
+
+    # ========================================================
+    # IST SERVICEZEIT
+    # ========================================================
+
+    if (
+        actual_service_s
+        is not None
+    ):
+
+        target_stop[
+            "actual_service_s"
+        ] = max(
+            0,
+            _safe_int(
+                actual_service_s
+            )
+        )
+
+    # ========================================================
+    # NEUE ABFAHRT
+    # ========================================================
+
+    normalized_departure = None
+
+    if (
+        new_departure_time
+        is not None
+    ):
+
+        text = str(
+            new_departure_time
+        ).strip()
+
+        if text:
+
+            normalized_departure = (
+                _parse_datetime(
+                    new_departure_time
+                )
+            )
+
+    # ========================================================
+    # URSPRÜNGLICHER TOURSTART
+    # ========================================================
+
+    original_start = (
+        previous_forecast.get(
+            "started_at"
+        )
+    )
+
+    if not original_start:
+
+        raise ValueError(
+            "Vorheriger Forecast enthält "
+            "keine started_at-Zeit."
+        )
+
+    # ========================================================
+    # NEUE VERSION BERECHNEN
+    # ========================================================
+
+    return (
+        calculate_tour_forecast(
+
+            route=
+                route_copy,
+
+            depot=
+                depot,
+
+            start_time=
+                original_start,
+
+            api_key=
+                api_key,
+
+            timeout=
+                timeout,
+
+            tour_id=
+                tour_id,
+
+            forecast_version=
+                new_version,
+
+            vehicle_parameters=
+                vehicle_parameters,
+
+            recalculation_from_stop=
+                str(
+                    from_stop_id
+                ),
+
+            previous_segments=
+                old_segments,
+
+            recalculation_departure_time=
+                normalized_departure,
+        )
+    )
+
+
+# ============================================================
+# SEGMENT-TABELLE
+# ============================================================
+
+def segment_rows(
+    forecast: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+
+    rows = []
+
+    for segment in (
+        forecast.get(
+            "segments"
+        )
+        or []
+    ):
+
+        rows.append({
+
+            "segment":
+                segment.get(
+                    "segment_id"
+                ),
+
+            "von":
+                segment.get(
+                    "from_stop_name"
+                ),
+
+            "nach":
+                segment.get(
+                    "to_stop_name"
+                ),
+
+            "abfahrt":
+                segment.get(
+                    "departure_time"
+                ),
+
+            "ankunft_forecast":
+                segment.get(
+                    "arrival_time_forecast"
+                ),
+
+            # ------------------------------------------------
+            # 1 OSRM
+            # ------------------------------------------------
+
+            "osrm_basis_min":
+                round(
+                    _safe_int(
+                        segment.get(
+                            "osrm_baseline_s"
+                        )
+                    )
+                    / 60
+                ),
+
+            # ------------------------------------------------
+            # TOMTOM REFERENZ
+            # ------------------------------------------------
+
+            "tomtom_ohne_verkehr_min":
+                round(
+                    _safe_int(
+                        segment.get(
+                            "tomtom_no_traffic_s"
+                        )
+                    )
+                    / 60
+                ),
+
+            # ------------------------------------------------
+            # 3 HISTORISCH
+            # ------------------------------------------------
+
+            "tomtom_historisch_min":
+                round(
+                    _safe_int(
+                        segment.get(
+                            "tomtom_historic_s"
+                        )
+                    )
+                    / 60
+                ),
+
+            # ------------------------------------------------
+            # 2 LIVE
+            # ------------------------------------------------
+
+            "tomtom_live_min":
+                round(
+                    _safe_int(
+                        segment.get(
+                            "tomtom_live_s"
+                        )
+                    )
+                    / 60
+                ),
+
+            # ------------------------------------------------
+            # 4 EIGENER FORECAST
+            # ------------------------------------------------
+
+            "forecast_min":
+                round(
+                    _safe_int(
+                        segment.get(
+                            "model_forecast_s"
+                        )
+                    )
+                    / 60
+                ),
+
+            # ------------------------------------------------
+            # 5 IST
+            # ------------------------------------------------
+
+            "ist_min": (
+
+                round(
+                    _safe_int(
+                        segment.get(
+                            "actual_travel_s"
+                        )
+                    )
+                    / 60
+                )
+
+                if (
+                    segment.get(
+                        "actual_travel_s"
+                    )
+                    is not None
+                )
+
+                else None
+            ),
+
+            # ------------------------------------------------
+            # TRAFFIC
+            # ------------------------------------------------
+
+            "traffic_delay_min":
+                round(
+                    _safe_int(
+                        segment.get(
+                            "tomtom_traffic_delay_s"
+                        )
+                    )
+                    / 60
+                ),
+
+            # ------------------------------------------------
+            # SERVICE
+            # ------------------------------------------------
+
+            "service_geplant_min":
+                round(
+                    _safe_int(
+                        segment.get(
+                            "planned_service_s"
+                        )
+                    )
+                    / 60
+                ),
+
+            "service_ist_min": (
+
+                round(
+                    _safe_int(
+                        segment.get(
+                            "actual_service_s"
+                        )
+                    )
+                    / 60
+                )
+
+                if (
+                    segment.get(
+                        "actual_service_s"
+                    )
+                    is not None
+                )
+
+                else None
+            ),
+
+            "service_verwendet_min":
+                round(
+                    _effective_service_s(
+                        segment
+                    )
+                    / 60
+                ),
+
+            # ------------------------------------------------
+            # REFORECAST
+            # ------------------------------------------------
+
+            "neu_berechnet":
+                bool(
+                    segment.get(
+                        "recalculated"
+                    )
+                ),
+
+            "tomtom_ok":
+                bool(
+                    segment.get(
+                        "tomtom_success"
+                    )
+                ),
+        })
+
+    return rows
+
+
+# ============================================================
+# TOUR SUMMARY
+# ============================================================
+
+def tour_summary(
+    forecast: Dict[str, Any]
+) -> Dict[str, Any]:
+
+    segments = (
+        forecast.get(
+            "segments"
+        )
+        or []
+    )
+
+    # ========================================================
+    # AKTUELL VERWENDETE SERVICEZEIT
+    #
+    # IST sofern bekannt,
+    # sonst geplant.
+    # ========================================================
+
+    effective_service_s = sum(
+
+        _effective_service_s(
+            segment
+        )
+
+        for segment
+        in segments
+    )
+
+    # ========================================================
+    # NUR BEKANNTE IST SERVICEZEITEN
+    # ========================================================
+
+    known_actual_service_s = sum(
+
+        _safe_int(
+            segment.get(
+                "actual_service_s"
+            )
+        )
+
+        for segment
+        in segments
+
+        if (
+            segment.get(
+                "actual_service_s"
+            )
+            is not None
+        )
+    )
+
+    return {
+
+        "tour_id":
+            forecast.get(
+                "tour_id"
+            ),
+
+        "forecast_version":
+            forecast.get(
+                "forecast_version"
+            ),
+
+        "vehicle_id":
+            forecast.get(
+                "vehicle_id"
+            ),
+
+        "stopps":
+            forecast.get(
+                "stop_count"
+            ),
+
+        "segmente":
+            forecast.get(
+                "segment_count"
+            ),
+
+        "distanz_km":
+            round(
+                _safe_float(
+                    forecast.get(
+                        "total_distance_m"
+                    )
+                )
+                / 1000,
+                1
+            ),
+
+        # ====================================================
+        # 1 OSRM BASIS
+        # ====================================================
+
+        "osrm_basis_min":
+            round(
+                _safe_int(
+                    forecast.get(
+                        "osrm_baseline_s"
+                    )
+                )
+                / 60
+            ),
+
+        # ====================================================
+        # TOMTOM REFERENZ
+        # ====================================================
+
+        "tomtom_ohne_verkehr_min":
+            round(
+                _safe_int(
+                    forecast.get(
+                        "tomtom_no_traffic_s"
+                    )
+                )
+                / 60
+            ),
+
+        # ====================================================
+        # 3 TOMTOM HISTORISCH
+        # ====================================================
+
+        "tomtom_historisch_min":
+            round(
+                _safe_int(
+                    forecast.get(
+                        "tomtom_historic_s"
+                    )
+                )
+                / 60
+            ),
+
+        # ====================================================
+        # 2 TOMTOM LIVE
+        # ====================================================
+
+        "tomtom_live_min":
+            round(
+                _safe_int(
+                    forecast.get(
+                        "tomtom_live_s"
+                    )
+                )
+                / 60
+            ),
+
+        # ====================================================
+        # 4 EIGENER FORECAST
+        # ====================================================
+
+        "forecast_fahrzeit_min":
+            round(
+                _safe_int(
+                    forecast.get(
+                        "model_forecast_s"
+                    )
+                )
+                / 60
+            ),
+
+        # ====================================================
+        # SERVICE
+        # ====================================================
+
+        "service_geplant_min":
+            round(
+                _safe_int(
+                    forecast.get(
+                        "planned_service_s"
+                    )
+                )
+                / 60
+            ),
+
+        "service_ist_bekannt_min":
+            round(
+                known_actual_service_s
+                / 60
+            ),
+
+        "service_verwendet_min":
+            round(
+                effective_service_s
+                / 60
+            ),
+
+        # ====================================================
+        # GESAMT FORECAST
+        #
+        # Forecast-Fahrzeit
+        # +
+        # bekannte IST-Servicezeiten
+        # +
+        # geplante Servicezeiten der restlichen Stopps
+        # ====================================================
+
+        "forecast_gesamt_min":
+            round(
+
+                (
+                    _safe_int(
+                        forecast.get(
+                            "model_forecast_s"
+                        )
+                    )
+
+                    +
+
+                    effective_service_s
+                )
+
+                / 60
+            ),
+
+        # ====================================================
+        # 5 IST
+        # ====================================================
+
+        "ist_fahrzeit_min": (
+
+            round(
+                _safe_int(
+                    forecast.get(
+                        "actual_travel_s"
+                    )
+                )
+                / 60
+            )
+
+            if (
+                forecast.get(
+                    "actual_travel_s"
+                )
+                is not None
+            )
+
+            else None
+        ),
+
+        # ====================================================
+        # REFORECAST
+        # ====================================================
+
+        "neu_berechnet":
+            bool(
+                forecast.get(
+                    "recalculated"
+                )
+            ),
+
+        "ab_stopp":
+            forecast.get(
+                "recalculation_from_stop"
+            ),
+    }
+
+
+# ============================================================
+# ABWÄRTSKOMPATIBILITÄT
+# ============================================================
+
+def forecast_summary(
+    distance_m,
+    baseline_s,
+    traffic_s,
+    service_min
+):
+    """
+    Alte Funktion bleibt bestehen,
+    falls ältere Komponenten sie noch importieren.
+    """
+
+    distance_m = float(
+        distance_m
+        or 0
+    )
+
+    baseline_s = float(
+        baseline_s
+        or 0
+    )
+
+    traffic_s = float(
+        traffic_s
+        or 0
+    )
+
+    service_min = float(
+        service_min
+        or 0
+    )
+
+    total_s = (
+
+        baseline_s
+
+        +
+
+        traffic_s
+
+        +
+
+        service_min
+        * 60
+    )
+
+    return {
+
+        "distanz_km":
+            round(
+                distance_m
+                / 1000,
+                1
+            ),
+
+        "basis_fahrzeit_min":
+            round(
+                baseline_s
+                / 60
+            ),
+
+        "live_zuschlag_min":
+            round(
+                traffic_s
+                / 60
+            ),
+
+        "servicezeit_min":
+            round(
+                service_min
+            ),
+
+        "gesamtzeit_min":
+            round(
+                total_s
+                / 60
+            ),
+    }
