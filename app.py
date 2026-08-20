@@ -13,17 +13,7 @@ import pandas as pd
 import spaces
 from dotenv import load_dotenv
 
-
-# ============================================================
-# UMGEBUNG
-# ============================================================
-
 load_dotenv()
-
-
-# ============================================================
-# PROJEKT-IMPORTS
-# ============================================================
 
 from src.capacity import normalize_orders, summarize_orders
 from src.clustering import cluster_orders
@@ -50,11 +40,6 @@ from src.training_logger import (
 
 @spaces.GPU(duration=1)
 def zerogpu_startup_check():
-    """
-    ZeroGPU-Kompatibilitätsfunktion.
-
-    Routing, Forecast und TomTom laufen auf CPU.
-    """
     return True
 
 
@@ -130,7 +115,6 @@ def _read_json(payload: str) -> pd.DataFrame:
             "null"
         }
     ):
-
         return pd.DataFrame()
 
     return pd.read_json(
@@ -147,7 +131,6 @@ def _json_load(
     try:
 
         if not payload:
-
             return default
 
         return json.loads(
@@ -155,12 +138,11 @@ def _json_load(
         )
 
     except Exception:
-
         return default
 
 
 # ============================================================
-# CSV SPALTENNAMEN
+# CSV SPALTEN
 # ============================================================
 
 def _normalize_column_name(name):
@@ -174,51 +156,21 @@ def _normalize_column_name(name):
     )
 
     aliases = {
-
-        "kundenname":
-            "kunde",
-
-        "straße":
-            "strasse",
-
-        "str.":
-            "strasse",
-
-        "gewicht":
-            "warengewicht_kg",
-
-        "gewicht_kg":
-            "warengewicht_kg",
-
-        "servicezeit":
-            "service_min",
-
-        "servicezeit_min":
-            "service_min",
-
-        "entladezeit":
-            "service_min",
-
-        "entladezeit_min":
-            "service_min",
-
-        "palettenanzahl":
-            "paletten",
-
-        "anzahl_paletten":
-            "paletten",
-
-        "auftragsnummer":
-            "auftrag",
-
-        "auftrag_id":
-            "auftrag",
-
-        "postleitzahl":
-            "plz",
-
-        "stadt":
-            "ort",
+        "kundenname": "kunde",
+        "straße": "strasse",
+        "str.": "strasse",
+        "gewicht": "warengewicht_kg",
+        "gewicht_kg": "warengewicht_kg",
+        "servicezeit": "service_min",
+        "servicezeit_min": "service_min",
+        "entladezeit": "service_min",
+        "entladezeit_min": "service_min",
+        "palettenanzahl": "paletten",
+        "anzahl_paletten": "paletten",
+        "auftragsnummer": "auftrag",
+        "auftrag_id": "auftrag",
+        "postleitzahl": "plz",
+        "stadt": "ort",
     }
 
     return aliases.get(
@@ -245,20 +197,13 @@ def make_fleet(
     ):
 
         rows.append({
-
-            "vehicle_id":
-                f"LKW-K{i:02d}",
-
+            "vehicle_id": f"LKW-K{i:02d}",
             **SMALL,
-
-            "color":
-                COLORS[
-                    color_idx
-                    % len(COLORS)
-                ],
-
-            "available":
-                True,
+            "color": COLORS[
+                color_idx
+                % len(COLORS)
+            ],
+            "available": True,
         })
 
         color_idx += 1
@@ -269,20 +214,13 @@ def make_fleet(
     ):
 
         rows.append({
-
-            "vehicle_id":
-                f"LKW-G{i:02d}",
-
+            "vehicle_id": f"LKW-G{i:02d}",
             **LARGE,
-
-            "color":
-                COLORS[
-                    color_idx
-                    % len(COLORS)
-                ],
-
-            "available":
-                True,
+            "color": COLORS[
+                color_idx
+                % len(COLORS)
+            ],
+            "available": True,
         })
 
         color_idx += 1
@@ -298,7 +236,6 @@ def update_fleet(
 ):
 
     df = make_fleet(
-
         max(
             0,
             int(
@@ -306,7 +243,6 @@ def update_fleet(
                 or 0
             )
         ),
-
         max(
             0,
             int(
@@ -324,9 +260,7 @@ def update_fleet(
         )
 
     return (
-
         df,
-
         (
             f"**{len(df)} Fahrzeuge · "
             f"{int(df.pallet_capacity.sum())} "
@@ -338,7 +272,7 @@ def update_fleet(
 
 
 # ============================================================
-# FAHRZEUGPARAMETER FÜR TOMTOM
+# TOMTOM FAHRZEUGPARAMETER
 # ============================================================
 
 def vehicle_parameters(
@@ -352,51 +286,24 @@ def vehicle_parameters(
         )
     )
 
-    if (
-        "40"
-        in vehicle_class
-    ):
+    if "40" in vehicle_class:
 
         return {
-
-            "vehicle_weight_kg":
-                40000,
-
-            "vehicle_height_m":
-                4.0,
-
-            "vehicle_width_m":
-                2.55,
-
-            "vehicle_length_m":
-                16.5,
-
-            "vehicle_max_speed_kmh":
-                80,
-
-            "vehicle_commercial":
-                True,
+            "vehicle_weight_kg": 40000,
+            "vehicle_height_m": 4.0,
+            "vehicle_width_m": 2.55,
+            "vehicle_length_m": 16.5,
+            "vehicle_max_speed_kmh": 80,
+            "vehicle_commercial": True,
         }
 
     return {
-
-        "vehicle_weight_kg":
-            14000,
-
-        "vehicle_height_m":
-            4.0,
-
-        "vehicle_width_m":
-            2.55,
-
-        "vehicle_length_m":
-            10.0,
-
-        "vehicle_max_speed_kmh":
-            80,
-
-        "vehicle_commercial":
-            True,
+        "vehicle_weight_kg": 14000,
+        "vehicle_height_m": 4.0,
+        "vehicle_width_m": 2.55,
+        "vehicle_length_m": 10.0,
+        "vehicle_max_speed_kmh": 80,
+        "vehicle_commercial": True,
     }
 
 
@@ -439,11 +346,9 @@ def read_csv(file):
             )
 
         df.columns = [
-
             _normalize_column_name(
                 column
             )
-
             for column
             in df.columns
         ]
@@ -457,15 +362,12 @@ def read_csv(file):
         )
 
         return (
-
             df,
-
             (
                 f"✅ **{summary['auftraege']} Aufträge · "
                 f"{summary['paletten']} Paletten · "
                 f"{summary['gewicht_kg']:,} kg**"
             ),
-
             df.to_json(
                 orient="records",
                 force_ascii=False
@@ -473,7 +375,6 @@ def read_csv(file):
         )
 
     except gr.Error:
-
         raise
 
     except Exception as exc:
@@ -551,63 +452,41 @@ def geocode_all(
             status = "MANUELL PRÜFEN"
 
         full_rows.append({
-
-            "auftrag":
-                oid,
-
-            "kunde":
-                str(
-                    row["kunde"]
-                ),
-
-            "eingabe":
-                str(
-                    row["adresse"]
-                ),
-
-            "treffer":
-                (
-                    best.get(
-                        "display_name",
-                        ""
-                    )
-                    if best
-                    else ""
-                ),
-
-            "confidence":
-                confidence,
-
-            "status":
-                status,
-
-            "lat":
-                (
-                    best.get(
-                        "lat"
-                    )
-                    if best
-                    else None
-                ),
-
-            "lon":
-                (
-                    best.get(
-                        "lon"
-                    )
-                    if best
-                    else None
-                ),
-
-            "provider":
-                (
-                    best.get(
-                        "provider",
-                        ""
-                    )
-                    if best
-                    else ""
-                ),
+            "auftrag": oid,
+            "kunde": str(
+                row["kunde"]
+            ),
+            "eingabe": str(
+                row["adresse"]
+            ),
+            "treffer": (
+                best.get(
+                    "display_name",
+                    ""
+                )
+                if best
+                else ""
+            ),
+            "confidence": confidence,
+            "status": status,
+            "lat": (
+                best.get("lat")
+                if best
+                else None
+            ),
+            "lon": (
+                best.get("lon")
+                if best
+                else None
+            ),
+            "provider": (
+                best.get(
+                    "provider",
+                    ""
+                )
+                if best
+                else ""
+            ),
         })
 
     full = pd.DataFrame(
@@ -615,21 +494,17 @@ def geocode_all(
     )
 
     return (
-
         address_visible(
             full
         ),
-
         full.to_json(
             orient="records",
             force_ascii=False
         ),
-
         json.dumps(
             candidates,
             ensure_ascii=False
         ),
-
         address_status(
             full
         ),
@@ -639,36 +514,24 @@ def geocode_all(
 def address_visible(full):
 
     if full.empty:
-
         return pd.DataFrame()
 
     return pd.DataFrame({
-
         "auftrag":
-            full[
-                "auftrag"
-            ].astype(str),
+            full["auftrag"].astype(str),
 
         "kunde":
-            full[
-                "kunde"
-            ].astype(str),
+            full["kunde"].astype(str),
 
         "adresse":
-            full[
-                "eingabe"
-            ].astype(str),
+            full["eingabe"].astype(str),
 
         "status":
-            full[
-                "status"
-            ].astype(str),
+            full["status"].astype(str),
 
         "treffer":
             (
-                full[
-                    "treffer"
-                ]
+                full["treffer"]
                 .fillna("")
                 .astype(str)
             ),
@@ -676,9 +539,7 @@ def address_visible(full):
         "sicherheit":
             (
                 pd.to_numeric(
-                    full[
-                        "confidence"
-                    ],
+                    full["confidence"],
                     errors="coerce"
                 )
                 .fillna(0)
@@ -701,9 +562,7 @@ def address_status(full):
 
     open_count = int(
         (
-            full[
-                "status"
-            ]
+            full["status"]
             == "MANUELL PRÜFEN"
         ).sum()
     )
@@ -723,16 +582,11 @@ def address_status(full):
 def _next_open(full):
 
     rows = full[
-
-        full[
-            "status"
-        ].astype(str)
-
+        full["status"].astype(str)
         == "MANUELL PRÜFEN"
     ]
 
     if rows.empty:
-
         return None
 
     return rows.iloc[0]
@@ -754,12 +608,9 @@ def prepare_review(
     if row is None:
 
         return (
-
             "",
             "[]",
-
             "✅ Alle Adressen sind eindeutig.",
-
             gr.update(
                 choices=[],
                 value=None,
@@ -782,15 +633,12 @@ def prepare_review(
     )
 
     choices = [
-
         hit.get(
             "display_name",
             ""
         )
-
         for hit
         in hits
-
         if hit.get(
             "display_name"
         )
@@ -809,42 +657,32 @@ def prepare_review(
         and current
         not in choices
     ):
-
         choices.insert(
             0,
             current
         )
 
     return (
-
         oid,
-
         json.dumps(
             hits,
             ensure_ascii=False
         ),
-
         (
             "### Jetzt prüfen\n"
             f"**{row['kunde']}**  \n"
             f"{row['eingabe']}"
         ),
-
         gr.update(
-
-            choices=
-                choices,
-
+            choices=choices,
             value=(
                 choices[0]
                 if choices
                 else None
             ),
-
-            interactive=
-                bool(
-                    choices
-                ),
+            interactive=bool(
+                choices
+            ),
         ),
     )
 
@@ -893,12 +731,8 @@ def confirm_review(
     if chosen is None:
 
         current_rows = full[
-            full[
-                "auftrag"
-            ].astype(str)
-            == str(
-                oid
-            )
+            full["auftrag"].astype(str)
+            == str(oid)
         ]
 
         if not current_rows.empty:
@@ -920,37 +754,19 @@ def confirm_review(
             ):
 
                 chosen = {
-
-                    "display_name":
-                        selected,
-
-                    "lat":
-                        current["lat"],
-
-                    "lon":
-                        current["lon"],
-
+                    "display_name": selected,
+                    "lat": current["lat"],
+                    "lon": current["lon"],
                     "confidence":
-                        current[
-                            "confidence"
-                        ],
-
+                        current["confidence"],
                     "provider":
-                        current[
-                            "provider"
-                        ],
+                        current["provider"],
                 }
 
     if (
         chosen is None
-        or chosen.get(
-            "lat"
-        )
-        is None
-        or chosen.get(
-            "lon"
-        )
-        is None
+        or chosen.get("lat") is None
+        or chosen.get("lon") is None
     ):
 
         raise gr.Error(
@@ -958,12 +774,8 @@ def confirm_review(
         )
 
     mask = (
-        full[
-            "auftrag"
-        ].astype(str)
-        == str(
-            oid
-        )
+        full["auftrag"].astype(str)
+        == str(oid)
     )
 
     full.loc[
@@ -1030,9 +842,7 @@ def confirm_review(
     else:
 
         next_oid = str(
-            next_row[
-                "auftrag"
-            ]
+            next_row["auftrag"]
         )
 
         all_candidates = _json_load(
@@ -1046,15 +856,12 @@ def confirm_review(
         )
 
         choices = [
-
             hit.get(
                 "display_name",
                 ""
             )
-
             for hit
             in hits2
-
             if hit.get(
                 "display_name"
             )
@@ -1091,39 +898,29 @@ def confirm_review(
         )
 
         choice = gr.update(
-
-            choices=
-                choices,
-
+            choices=choices,
             value=(
                 choices[0]
                 if choices
                 else None
             ),
-
-            interactive=
-                bool(
-                    choices
-                ),
+            interactive=bool(
+                choices
+            ),
         )
 
     return (
-
         address_visible(
             full
         ),
-
         full.to_json(
             orient="records",
             force_ascii=False
         ),
-
         address_status(
             full
         ),
-
         f"✅ Bestätigt: **{selected}**",
-
         next_oid,
         next_hits,
         info,
@@ -1151,9 +948,7 @@ def save_addresses(
         )
 
     if (
-        full[
-            "status"
-        ]
+        full["status"]
         == "MANUELL PRÜFEN"
     ).any():
 
@@ -1162,7 +957,6 @@ def save_addresses(
         )
 
     merged = orders.merge(
-
         full[
             [
                 "auftrag",
@@ -1171,12 +965,8 @@ def save_addresses(
                 "lon"
             ]
         ],
-
-        on=
-            "auftrag",
-
-        how=
-            "left",
+        on="auftrag",
+        how="left",
     )
 
     if (
@@ -1196,10 +986,128 @@ def save_addresses(
         )
 
     return (
-
         merged.to_json(
             orient="records",
             force_ascii=False
         ),
+        (
+            "✅ Adressen abgeschlossen. "
+            "Weiter zur Flotte und Clusterbildung."
+        ),
+    )
 
-        
+
+# ============================================================
+# DEPOT
+# ============================================================
+
+def search_depot(address):
+
+    address = str(
+        address
+        or ""
+    ).strip()
+
+    if not address:
+
+        raise gr.Error(
+            "Depotadresse eingeben."
+        )
+
+    hits = Geocoder(
+        TIMEOUT
+    ).search(
+        address,
+        5
+    )
+
+    if not hits:
+
+        return (
+            "[]",
+            gr.update(
+                choices=[],
+                value=None,
+                interactive=False
+            ),
+            "⚠️ Kein Depot-Treffer.",
+        )
+
+    choices = [
+        hit["display_name"]
+        for hit
+        in hits
+    ]
+
+    return (
+        json.dumps(
+            hits,
+            ensure_ascii=False
+        ),
+        gr.update(
+            choices=choices,
+            value=choices[0],
+            interactive=True
+        ),
+        (
+            "Depotvorschlag gefunden – "
+            "bitte bestätigen."
+        ),
+    )
+
+
+def confirm_depot(
+    input_address,
+    hits_json,
+    selected
+):
+
+    hits = _json_load(
+        hits_json,
+        []
+    )
+
+    chosen = next(
+        (
+            hit
+            for hit
+            in hits
+            if hit.get(
+                "display_name"
+            )
+            == selected
+        ),
+        None
+    )
+
+    if not chosen:
+
+        raise gr.Error(
+            "Depotvorschlag auswählen."
+        )
+
+    state = {
+        "address_input": input_address,
+        "display_name":
+            chosen["display_name"],
+        "lat":
+            chosen["lat"],
+        "lon":
+            chosen["lon"],
+        "confidence":
+            chosen.get(
+                "confidence",
+                0
+            ),
+        "provider":
+            chosen.get(
+                "provider",
+                ""
+            ),
+    }
+
+    return (
+        json.dumps(
+            state,
+            ensure_ascii=False
+        ),
