@@ -677,4 +677,710 @@ def calculate_all_forecasts(
             row["forecast_version"] = forecast.get("forecast_version")
             segment_table_rows.append(row)
 
-  
+        try:
+            log_result = log_forecast(forecast)
+            logging_results.append({
+                "vehicle_id": vehicle_id,
+                "result": log_result,
+            })
+        except Exception as exc:
+            logging_results.append({
+                "vehicle_id": vehicle_id,
+                "error": str(exc),
+            })
+
+        debug.append({
+            "vehicle_id": vehicle_id,
+            "tour_id": forecast.get("tour_id"),
+            "forecast_version": forecast.get("forecast_version"),
+            "segments": forecast.get("segments"),
+        })
+
+    if not forecasts:
+        raise gr.Error("Kein Forecast konnte berechnet werden.")
+
+    summary_df = pd.DataFrame(summary_rows)
+    segments_df = pd.DataFrame(segment_table_rows)
+    markdown = build_forecast_markdown(summary_df)
+
+    first_vehicle = vehicle_choices[0] if vehicle_choices else None
+    stop_choices = forecast_stop_choices(
+        forecasts.get(first_vehicle, {})
+    )
+
+    combined_debug = {
+        "forecast": debug,
+        "logging": logging_results,
+        "logger_status": training_logger_status(),
+    }
+
+    return (
+        summary_df,
+        segments_df,
+        markdown,
+        json.dumps(forecasts, ensure_ascii=False, default=str),
+        json.dumps(combined_debug, ensure_ascii=False, indent=2, default=str),
+        gr.update(
+            choices=vehicle_choices,
+            value=first_vehicle,
+            interactive=bool(vehicle_choices)
+        ),
+        gr.update(
+            choices=stop_choices,
+            value=stop_choices[0] if stop_choices else None,
+            interactive=bool(stop_choices)
+        ),
+        "✅ Segment-Forecast berechnet und Trainingslogger ausgeführt.",
+    )
+
+
+def build_forecast_markdown(summary_df):
+    if summary_df is None or summary_df.empty:
+        return "Noch kein Forecast vorhanden."
+
+    lines = [
+        "## Dynamischer Tour-Forecast 4.9.5",
+        "",
+        (
+            "Die Fahrzeit wird **zwischen jedem Stopp separat** berechnet. "
+            "Servicezeiten verschieben die Abfahrtszeit des nächsten Segments."
+        ),
+        "",
+    ]
+
+    for _, row in summary_df.iterrows():
+        ist_value = row.get("ist_fahrzeit_min")
+        ist_text = "noch offen" if pd.isna(ist_value) else f"{ist_value} min"
+
+        lines += [
+            f"### 🚚 {row['vehicle_id']} · Forecast V{row['forecast_version']}",
+            f"- Stopps: **{row['stopps']}**",
+            f"- Distanz: **{row['distanz_km']} km**",
+            "",
+            "**Fahrzeitvergleich**",
+            f"- 1 · OSRM Basis: **{row['osrm_basis_min']} min**",
+            f"- 2 · TomTom Live: **{row['tomtom_live_min']} min**",
+            f"- 3 · TomTom Historisch: **{row['tomtom_historisch_min']} min**",
+            f"- 4 · Eigener Forecast: **{row['forecast_fahrzeit_min']} min**",
+            f"- 5 · IST: **{ist_text}**",
+            "",
+            f"- Service geplant: **{row['service_geplant_min']} min**",
+            (
+                "- Service aktuell verwendet: "
+                f"**{row.get('service_verwendet_min', row['service_geplant_min'])} min**"
+            ),
+            f"- Forecast Gesamt: **{row['forecast_gesamt_min']} min**",
+            "",
+        ]
+
+    return "\n".join(lines)
+
+
+def forecast_stop_choices(forecast):
+    if not forecast:
+        return []
+
+    choices = []
+    seen = set()
+
+    for segment in forecast.get("segments") or []:
+        stop_id = segment.get("to_stop_id")
+
+        if (
+            not stop_id
+            or stop_id == "DEPOT"
+            or stop_id in seen
+        ):
+            continue
+
+        seen.add(stop_id)
+        choices.append(str(stop_id))
+
+    return choices
+
+
+def update_reforecast_stops(forecasts_json, vehicle_id):
+    forecasts = _json_load(forecasts_json, {})
+    forecast = forecasts.get(str(vehicle_id), {})
+    choices = forecast_stop_choices(forecast)
+
+    return gr.update(
+        choices=choices,
+        value=choices[0] if choices else None,
+        interactive=bool(choices)
+    )
+
+
+def reforecast_from_stop(
+    forecasts_json,
+    routes_json,
+    depot_json,
+    vehicle_table,
+    vehicle_id,
+    stop_id,
+    actual_service_min,
+    actual_departure
+):
+    forecasts = _json_load(forecasts_json, {})
+    routes = _json_load(routes_json, [])
+    depot = _json_load(depot_json, {})
+    vehicles = pd.DataFrame(vehicle_table)
+
+    if not vehicle_id:
+        raise gr.Error("Bitte LKW auswählen.")
+    if not stop_id:
+        raise gr.Error("Bitte Stopp auswählen.")
+
+    previous = forecasts.get(str(vehicle_id))
+
+    if not previous:
+        raise gr.Error("Für diesen LKW existiert kein Forecast.")
+
+    route = next(
+        (
+            route
+            for route in routes
+            if str(route.get("vehicle_id")) == str(vehicle_id)
+        ),
+        None
+    )
+
+    if not route:
+        raise gr.Error("Route des LKW wurde nicht gefunden.")
+
+    vehicle_rows = vehicles[
+        vehicles["vehicle_id"].astype(str) == str(vehicle_id)
+    ]
+
+    params = (
+        {}
+        if vehicle_rows.empty
+        else vehicle_parameters(vehicle_rows.iloc[0])
+    )
+
+    service_seconds = None
+
+    if (
+        actual_service_min is not None
+        and str(actual_service_min).strip() != ""
+    ):
+        service_seconds = max(
+            0,
+            int(round(float(actual_service_min) * 60))
+        )
+
+    departure_value = str(actual_departure or "").strip() or None
+
+    try:
+        new_forecast = recalculate_tour_from_stop(
+            previous_forecast=previous,
+            route=route,
+            depot=depot,
+            from_stop_id=str(stop_id),
+            new_departure_time=departure_value,
+            actual_service_s=service_seconds,
+            api_key=TOMTOM_API_KEY,
+            timeout=TIMEOUT,
+            vehicle_parameters=params,
+        )
+    except Exception as exc:
+        raise gr.Error(
+            "Neuberechnung fehlgeschlagen: "
+            f"{type(exc).__name__}: {exc}"
+        )
+
+    forecasts[str(vehicle_id)] = new_forecast
+
+    try:
+        log_result = log_forecast(new_forecast)
+    except Exception as exc:
+        log_result = {"error": str(exc)}
+
+    summary_rows = []
+    segment_table_rows = []
+
+    for vid, forecast in forecasts.items():
+        summary_rows.append(tour_summary(forecast))
+
+        for row in segment_rows(forecast):
+            row["vehicle_id"] = vid
+            row["forecast_version"] = forecast.get("forecast_version")
+            segment_table_rows.append(row)
+
+    summary_df = pd.DataFrame(summary_rows)
+    segments_df = pd.DataFrame(segment_table_rows)
+
+    debug = {
+        "reforecast_vehicle": vehicle_id,
+        "reforecast_from_stop": stop_id,
+        "new_forecast_version": new_forecast.get("forecast_version"),
+        "logging": log_result,
+        "forecast": new_forecast,
+    }
+
+    return (
+        summary_df,
+        segments_df,
+        build_forecast_markdown(summary_df),
+        json.dumps(forecasts, ensure_ascii=False, default=str),
+        json.dumps(debug, ensure_ascii=False, indent=2, default=str),
+        (
+            f"✅ **{vehicle_id} ab Stopp {stop_id} neu berechnet. "
+            f"Forecast-Version {new_forecast.get('forecast_version')} gespeichert.**"
+        ),
+    )
+
+
+def logger_status_markdown():
+    status = training_logger_status()
+
+    if status.get("remote_logging_ready"):
+        return (
+            "🟢 **Trainingsspeicher bereit**  \n"
+            f"Dataset: `{status.get('hf_dataset_repo')}`"
+        )
+
+    problems = []
+
+    if not status.get("hf_token_configured"):
+        problems.append("HF_TOKEN fehlt")
+
+    if not status.get("dataset_configured"):
+        problems.append("HF_DATASET_REPO fehlt")
+
+    return (
+        "🟠 **Remote-Training-Logging noch nicht bereit.**  \n"
+        + " · ".join(problems)
+        + "  \nLokaler Fallback bleibt aktiv."
+    )
+
+
+CSS = """
+html, body { background: #0f1117 !important; }
+.gradio-container, .gradio-container > .main {
+    background: #0f1117 !important;
+    color: #f3f4f6 !important;
+}
+.gradio-container { min-height: 100vh; }
+.step-title {
+    font-size: 1.35rem;
+    font-weight: 750;
+    margin-bottom: .35rem;
+}
+#tour-map iframe {
+    width: 100% !important;
+    min-height: 560px !important;
+    height: 62vh !important;
+    border-radius: 12px;
+}
+#tour-map { min-height: 560px; }
+@media(max-width:768px) {
+    .gradio-container {
+        padding-left: 0 !important;
+        padding-right: 0 !important;
+    }
+    #tour-map iframe {
+        min-height: 500px !important;
+        height: 58vh !important;
+    }
+}
+"""
+
+
+with gr.Blocks(
+    title="Logistik Forecast 4.9.5",
+    css=CSS
+) as demo:
+
+    gr.Markdown(
+        "# Logistik Forecast 4.9.5\n"
+        "**Adressen → Flotte → Cluster → OSRM → "
+        "TomTom Segment-Forecast → Reforecast → ML-Dataset**"
+    )
+
+    orders_state = gr.State("[]")
+    address_state = gr.State("[]")
+    candidates_state = gr.State("{}")
+    geo_state = gr.State("[]")
+    depot_hits_state = gr.State("[]")
+    depot_state = gr.State("")
+    cluster_state = gr.State("[]")
+    routes_state = gr.State("[]")
+    forecasts_state = gr.State("{}")
+    selected_order_state = gr.State("")
+    selected_hits_state = gr.State("[]")
+
+    with gr.Tabs():
+
+        with gr.Tab("1 · Aufträge & Adressen"):
+            upload = gr.File(
+                label="CSV-Datei",
+                file_types=[".csv"],
+                type="filepath"
+            )
+            import_btn = gr.Button("CSV importieren", variant="primary")
+            order_summary = gr.Markdown()
+            orders_table = gr.Dataframe(
+                label="Aufträge",
+                interactive=False,
+                wrap=True
+            )
+            geocode_btn = gr.Button("Adressen automatisch prüfen")
+            address_status_md = gr.Markdown()
+            address_table = gr.Dataframe(
+                headers=[
+                    "auftrag", "kunde", "adresse",
+                    "status", "treffer", "sicherheit"
+                ],
+                label="Adressprüfung",
+                interactive=False,
+                wrap=True,
+            )
+            review_info = gr.Markdown("Noch keine Prüfung gestartet.")
+            address_choice = gr.Radio(
+                choices=[],
+                label="Welche Adresse ist richtig?",
+                interactive=False
+            )
+            confirm_review_btn = gr.Button(
+                "Adresse bestätigen",
+                variant="primary"
+            )
+            confirm_status = gr.Markdown()
+            finish_addresses_btn = gr.Button("Adressprüfung abschließen")
+            finish_status = gr.Markdown()
+
+        with gr.Tab("2 · Depot, Flotte & Regionen"):
+            depot_input = gr.Textbox(
+                label="Depotadresse",
+                placeholder="z. B. Mercedesstraße 1, 70372 Stuttgart"
+            )
+            depot_search_btn = gr.Button("Depot automatisch prüfen")
+            depot_choice = gr.Radio(
+                choices=[],
+                label="Gefundene Depotadresse",
+                interactive=False
+            )
+            depot_search_status = gr.Markdown()
+            depot_confirm_btn = gr.Button(
+                "Depot bestätigen",
+                variant="primary"
+            )
+            depot_status = gr.Markdown()
+
+            with gr.Row():
+                small_count = gr.Number(
+                    label="14-t-LKW",
+                    value=3,
+                    minimum=0,
+                    precision=0
+                )
+                large_count = gr.Number(
+                    label="40-t-LKW",
+                    value=3,
+                    minimum=0,
+                    precision=0
+                )
+                fleet_btn = gr.Button("Flotte aktualisieren")
+
+            fleet_status = gr.Markdown()
+            vehicle_table = gr.Dataframe(
+                value=make_fleet(3, 3),
+                label="Verfügbare Fahrzeuge",
+                interactive=True,
+                wrap=True,
+            )
+            cluster_btn = gr.Button(
+                "Regionen bilden & LKW zuweisen",
+                variant="primary"
+            )
+            cluster_status = gr.Markdown()
+            cluster_summary = gr.Dataframe(
+                label="Regionen / LKW-Auslastung",
+                wrap=True
+            )
+            cluster_assignments = gr.Dataframe(
+                label="Aufträge nach Region",
+                wrap=True
+            )
+
+        with gr.Tab("3 · Routenoptimierung"):
+            optimize_btn = gr.Button(
+                "LKW-Routen optimieren",
+                variant="primary"
+            )
+            optimize_status = gr.Markdown()
+            optimized_stops = gr.Dataframe(
+                label="Optimierte Stopp-Reihenfolge",
+                wrap=True
+            )
+            route_selector = gr.Dropdown(
+                choices=[],
+                label="Tour anzeigen",
+                interactive=False
+            )
+            map_html = gr.HTML(elem_id="tour-map")
+            routing_debug = gr.Code(
+                label="Routing-Debug",
+                language="json"
+            )
+
+        with gr.Tab("4 · Dynamischer Forecast"):
+            gr.Markdown(
+                "🟢 **TomTom API konfiguriert**"
+                if TOMTOM_API_KEY
+                else "🔴 **TOMTOM_API_KEY fehlt**"
+            )
+            logger_status_ui = gr.Markdown(logger_status_markdown())
+            start_time_input = gr.Textbox(
+                label="Tourstart",
+                placeholder="2026-08-20T07:00:00+02:00"
+            )
+            forecast_btn = gr.Button(
+                "Segment-Forecast berechnen",
+                variant="primary"
+            )
+            forecast_status = gr.Markdown()
+            forecast_md = gr.Markdown()
+            forecast_table = gr.Dataframe(
+                label="Tourübersicht – 5 Zeitkategorien",
+                wrap=True
+            )
+            segment_table = gr.Dataframe(
+                label="Forecast je Streckenabschnitt",
+                wrap=True
+            )
+            traffic_debug = gr.Code(
+                label="Forecast / Logging Debug",
+                language="json"
+            )
+
+        with gr.Tab("5 · Reforecast ab Stopp"):
+            reforecast_vehicle = gr.Dropdown(
+                choices=[],
+                label="LKW",
+                interactive=False
+            )
+            reforecast_stop = gr.Dropdown(
+                choices=[],
+                label="Neuberechnung ab Stopp",
+                interactive=False
+            )
+            actual_service_min = gr.Number(
+                label="Tatsächliche Servicezeit an diesem Stopp (Minuten)",
+                minimum=0,
+                precision=0,
+            )
+            actual_departure_input = gr.Textbox(
+                label="Tatsächliche / neue Abfahrtszeit",
+                placeholder="2026-08-20T10:35:00+02:00"
+            )
+            reforecast_btn = gr.Button(
+                "Ab diesem Stopp neu berechnen",
+                variant="primary"
+            )
+            reforecast_status = gr.Markdown()
+            reforecast_summary = gr.Dataframe(
+                label="Aktuelle Forecast-Versionen",
+                wrap=True
+            )
+            reforecast_segments = gr.Dataframe(
+                label="Aktuelle Segmente",
+                wrap=True
+            )
+            reforecast_md = gr.Markdown()
+            reforecast_debug = gr.Code(
+                label="Reforecast-Debug",
+                language="json"
+            )
+
+    import_btn.click(
+        read_csv,
+        upload,
+        [orders_table, order_summary, orders_state]
+    )
+
+    geocode_event = geocode_btn.click(
+        geocode_all,
+        orders_state,
+        [
+            address_table,
+            address_state,
+            candidates_state,
+            address_status_md
+        ],
+    )
+
+    geocode_event.then(
+        prepare_review,
+        [address_state, candidates_state],
+        [
+            selected_order_state,
+            selected_hits_state,
+            review_info,
+            address_choice
+        ],
+    )
+
+    confirm_review_btn.click(
+        confirm_review,
+        [
+            address_state,
+            candidates_state,
+            selected_order_state,
+            selected_hits_state,
+            address_choice
+        ],
+        [
+            address_table,
+            address_state,
+            address_status_md,
+            confirm_status,
+            selected_order_state,
+            selected_hits_state,
+            review_info,
+            address_choice,
+        ],
+    )
+
+    finish_addresses_btn.click(
+        save_addresses,
+        [address_state, orders_state],
+        [geo_state, finish_status],
+    )
+
+    depot_search_btn.click(
+        search_depot,
+        depot_input,
+        [
+            depot_hits_state,
+            depot_choice,
+            depot_search_status
+        ],
+    )
+
+    depot_confirm_btn.click(
+        confirm_depot,
+        [
+            depot_input,
+            depot_hits_state,
+            depot_choice
+        ],
+        [
+            depot_state,
+            depot_status
+        ],
+    )
+
+    fleet_btn.click(
+        update_fleet,
+        [
+            small_count,
+            large_count
+        ],
+        [
+            vehicle_table,
+            fleet_status
+        ],
+    )
+
+    cluster_btn.click(
+        create_clusters,
+        [
+            geo_state,
+            vehicle_table,
+            depot_state
+        ],
+        [
+            cluster_assignments,
+            cluster_summary,
+            cluster_state,
+            cluster_status
+        ],
+    )
+
+    optimize_btn.click(
+        optimize_routes,
+        [
+            cluster_state,
+            vehicle_table,
+            depot_state
+        ],
+        [
+            optimized_stops,
+            route_selector,
+            map_html,
+            routes_state,
+            routing_debug,
+            optimize_status,
+        ],
+    )
+
+    route_selector.change(
+        render_route,
+        [
+            routes_state,
+            route_selector,
+            depot_state
+        ],
+        map_html,
+    )
+
+    forecast_btn.click(
+        calculate_all_forecasts,
+        [
+            routes_state,
+            depot_state,
+            vehicle_table,
+            start_time_input
+        ],
+        [
+            forecast_table,
+            segment_table,
+            forecast_md,
+            forecasts_state,
+            traffic_debug,
+            reforecast_vehicle,
+            reforecast_stop,
+            forecast_status,
+        ],
+    )
+
+    reforecast_vehicle.change(
+        update_reforecast_stops,
+        [
+            forecasts_state,
+            reforecast_vehicle
+        ],
+        reforecast_stop,
+    )
+
+    reforecast_btn.click(
+        reforecast_from_stop,
+        [
+            forecasts_state,
+            routes_state,
+            depot_state,
+            vehicle_table,
+            reforecast_vehicle,
+            reforecast_stop,
+            actual_service_min,
+            actual_departure_input,
+        ],
+        [
+            reforecast_summary,
+            reforecast_segments,
+            reforecast_md,
+            forecasts_state,
+            reforecast_debug,
+            reforecast_status,
+        ],
+    )
+
+
+if __name__ == "__main__":
+    demo.launch(
+        server_name="0.0.0.0",
+        server_port=int(os.getenv("PORT", "7860")),
+        show_error=True,
+    )
