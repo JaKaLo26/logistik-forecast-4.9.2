@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from datetime import datetime
@@ -61,6 +62,53 @@ def _json_load(payload, default):
         return json.loads(payload) if payload else default
     except Exception:
         return default
+
+
+def _candidate_id(oid, hit, index):
+    """Stabile interne ID; der sichtbare Adresstext bleibt reine Anzeige."""
+    source = "|".join([
+        str(oid),
+        str(hit.get("provider", "")),
+        str(hit.get("lat", "")),
+        str(hit.get("lon", "")),
+        str(hit.get("display_name", "")),
+        str(index),
+    ])
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()[:16]
+
+
+def _prepare_candidates(oid, hits):
+    prepared = []
+    for index, hit in enumerate(hits or []):
+        if not isinstance(hit, dict):
+            continue
+        candidate = dict(hit)
+        candidate["candidate_id"] = (
+            str(candidate.get("candidate_id") or "")
+            or _candidate_id(oid, candidate, index)
+        )
+        prepared.append(candidate)
+    return prepared
+
+
+def _candidate_choices(hits):
+    return [
+        (str(hit["display_name"]), str(hit["candidate_id"]))
+        for hit in hits
+        if hit.get("display_name") and hit.get("candidate_id")
+    ]
+
+
+def _ensure_geo_dtypes(full):
+    """Koordinaten und Confidence bleiben auch nach JSON-Roundtrips float."""
+    for column in ("lat", "lon", "confidence"):
+        if column not in full.columns:
+            full[column] = float("nan")
+        full[column] = pd.to_numeric(
+            full[column],
+            errors="coerce",
+        ).astype(float)
+    return full
 
 
 def _normalize_column_name(name):
@@ -183,8 +231,11 @@ def geocode_all(orders_json):
     candidates = {}
 
     for _, row in orders.iterrows():
-        hits = geocoder.search(row["adresse"], 5)
         oid = str(row["auftrag"])
+        hits = _prepare_candidates(
+            oid,
+            geocoder.search(row["adresse"], 5),
+        )
         candidates[oid] = hits
         best = hits[0] if hits else None
 
@@ -259,53 +310,130 @@ def prepare_review(address_state_json, candidates_json):
         return (
             "",
             "[]",
+            gr.update(value="", interactive=False),
             "✅ Alle Adressen sind eindeutig.",
             gr.update(choices=[], value=None, interactive=False),
         )
 
     oid = str(row["auftrag"])
-    hits = _json_load(candidates_json, {}).get(oid, [])
-    choices = [h.get("display_name", "") for h in hits if h.get("display_name")]
-    current = str(row.get("treffer", "") or "")
-
-    if current and current not in choices:
-        choices.insert(0, current)
+    hits = _prepare_candidates(
+        oid,
+        _json_load(candidates_json, {}).get(oid, []),
+    )
+    choices = _candidate_choices(hits)
 
     return (
         oid,
         json.dumps(hits, ensure_ascii=False),
+        gr.update(value=str(row["eingabe"]), interactive=True),
         f"### Jetzt prüfen\n**{row['kunde']}**  \n{row['eingabe']}",
         gr.update(
             choices=choices,
-            value=choices[0] if choices else None,
+            value=choices[0][1] if choices else None,
             interactive=bool(choices),
         ),
     )
 
 
+def search_review_address(
+    address_state_json,
+    candidates_json,
+    oid,
+    address,
+):
+    full = _ensure_geo_dtypes(_read_json(address_state_json))
+    address = str(address or "").strip()
+
+    if full.empty or not oid:
+        raise gr.Error("Keine offene Adresse ausgewählt.")
+    if not address:
+        raise gr.Error("Bitte eine Adresse eingeben.")
+
+    mask = full["auftrag"].astype(str) == str(oid)
+    if not mask.any():
+        raise gr.Error("Der ausgewählte Auftrag wurde nicht gefunden.")
+
+    try:
+        hits = _prepare_candidates(
+            str(oid),
+            Geocoder(TIMEOUT).search(address, 5),
+        )
+    except Exception as exc:
+        raise gr.Error(
+            f"Adresssuche fehlgeschlagen: {type(exc).__name__}: {exc}"
+        )
+
+    candidates = _json_load(candidates_json, {})
+    candidates[str(oid)] = hits
+    full.loc[mask, "eingabe"] = address
+    full.loc[mask, "status"] = "MANUELL PRÜFEN"
+
+    if hits:
+        best = hits[0]
+        full.loc[mask, "treffer"] = best.get("display_name", "")
+        full.loc[mask, "lat"] = best.get("lat")
+        full.loc[mask, "lon"] = best.get("lon")
+        full.loc[mask, "confidence"] = best.get("confidence", 0)
+        full.loc[mask, "provider"] = best.get("provider", "")
+        message = (
+            f"### Treffer für die korrigierte Adresse\n"
+            f"**{full.loc[mask, 'kunde'].iloc[0]}**  \n{address}"
+        )
+        status = f"✅ {len(hits)} Adressvorschlag/-vorschläge gefunden."
+    else:
+        full.loc[mask, "treffer"] = ""
+        full.loc[mask, ["lat", "lon"]] = None
+        full.loc[mask, "confidence"] = 0.0
+        full.loc[mask, "provider"] = ""
+        message = (
+            "### Keine Treffer\n"
+            f"**{full.loc[mask, 'kunde'].iloc[0]}**  \n"
+            "Adresse oben korrigieren und erneut suchen."
+        )
+        status = "⚠️ Keine Vorschläge gefunden."
+
+    choices = _candidate_choices(hits)
+    return (
+        address_visible(full),
+        full.to_json(orient="records", force_ascii=False),
+        json.dumps(candidates, ensure_ascii=False),
+        json.dumps(hits, ensure_ascii=False),
+        message,
+        gr.update(
+            choices=choices,
+            value=choices[0][1] if choices else None,
+            interactive=bool(choices),
+        ),
+        status,
+    )
+
+
 def confirm_review(address_state_json, candidates_json, oid, hits_json, selected):
-    full = _read_json(address_state_json)
+    full = _ensure_geo_dtypes(_read_json(address_state_json))
 
     if not oid:
         raise gr.Error("Keine offene Adresse ausgewählt.")
     if not selected:
         raise gr.Error("Bitte Adresse auswählen.")
 
-    hits = _json_load(hits_json, [])
-    chosen = next((h for h in hits if h.get("display_name") == selected), None)
+    hits = _prepare_candidates(str(oid), _json_load(hits_json, []))
+    chosen = next(
+        (
+            hit for hit in hits
+            if str(hit.get("candidate_id")) == str(selected)
+        ),
+        None,
+    )
 
+    # Kompatibler Fallback für einen noch geöffneten alten Browser-State.
     if chosen is None:
-        current_rows = full[full["auftrag"].astype(str) == str(oid)]
-        if not current_rows.empty:
-            current = current_rows.iloc[0]
-            if str(current.get("treffer", "")) == str(selected):
-                chosen = {
-                    "display_name": selected,
-                    "lat": current["lat"],
-                    "lon": current["lon"],
-                    "confidence": current["confidence"],
-                    "provider": current["provider"],
-                }
+        chosen = next(
+            (
+                hit for hit in hits
+                if str(hit.get("display_name")) == str(selected)
+            ),
+            None,
+        )
 
     if chosen is None or chosen.get("lat") is None or chosen.get("lon") is None:
         raise gr.Error("Vorschlag konnte nicht übernommen werden.")
@@ -323,22 +451,26 @@ def confirm_review(address_state_json, candidates_json, oid, hits_json, selected
     if next_row is None:
         next_oid = ""
         next_hits = "[]"
+        next_address = gr.update(value="", interactive=False)
         info = "✅ **Adressprüfung abgeschlossen.**"
         choice = gr.update(choices=[], value=None, interactive=False)
     else:
         next_oid = str(next_row["auftrag"])
-        hits2 = _json_load(candidates_json, {}).get(next_oid, [])
-        choices = [h.get("display_name", "") for h in hits2 if h.get("display_name")]
-        current2 = str(next_row.get("treffer", "") or "")
-
-        if current2 and current2 not in choices:
-            choices.insert(0, current2)
+        hits2 = _prepare_candidates(
+            next_oid,
+            _json_load(candidates_json, {}).get(next_oid, []),
+        )
+        choices = _candidate_choices(hits2)
 
         next_hits = json.dumps(hits2, ensure_ascii=False)
+        next_address = gr.update(
+            value=str(next_row["eingabe"]),
+            interactive=True,
+        )
         info = f"### Jetzt prüfen\n**{next_row['kunde']}**  \n{next_row['eingabe']}"
         choice = gr.update(
             choices=choices,
-            value=choices[0] if choices else None,
+            value=choices[0][1] if choices else None,
             interactive=bool(choices),
         )
 
@@ -346,9 +478,10 @@ def confirm_review(address_state_json, candidates_json, oid, hits_json, selected
         address_visible(full),
         full.to_json(orient="records", force_ascii=False),
         address_status(full),
-        f"✅ Bestätigt: **{selected}**",
+        f"✅ Bestätigt: **{chosen['display_name']}**",
         next_oid,
         next_hits,
+        next_address,
         info,
         choice,
     )
@@ -1048,6 +1181,14 @@ with gr.Blocks(
                 wrap=True,
             )
             review_info = gr.Markdown("Noch keine Prüfung gestartet.")
+            review_address = gr.Textbox(
+                label="Adresse korrigieren oder ergänzen",
+                placeholder="Straße Hausnummer, PLZ Ort",
+                interactive=False,
+            )
+            search_review_btn = gr.Button(
+                "Korrigierte Adresse erneut suchen"
+            )
             address_choice = gr.Radio(
                 choices=[],
                 label="Welche Adresse ist richtig?",
@@ -1228,8 +1369,28 @@ with gr.Blocks(
         [
             selected_order_state,
             selected_hits_state,
+            review_address,
             review_info,
             address_choice
+        ],
+    )
+
+    search_review_btn.click(
+        search_review_address,
+        [
+            address_state,
+            candidates_state,
+            selected_order_state,
+            review_address,
+        ],
+        [
+            address_table,
+            address_state,
+            candidates_state,
+            selected_hits_state,
+            review_info,
+            address_choice,
+            confirm_status,
         ],
     )
 
@@ -1249,6 +1410,7 @@ with gr.Blocks(
             confirm_status,
             selected_order_state,
             selected_hits_state,
+            review_address,
             review_info,
             address_choice,
         ],
