@@ -152,7 +152,9 @@ class Geocoder:
             if len(coords) < 2:
                 continue
 
-            lon, lat = self._coordinates(coords[1], coords[0])
+            # Photon/GeoJSON liefert [lon, lat]. Intern verwendet die App
+            # durchgehend (lat, lon).
+            lat, lon = self._coordinates(coords[1], coords[0])
             properties = feature.get("properties") or {}
             countrycode = str(properties.get("countrycode") or "").lower()
             if countrycode and countrycode not in {"de", "deu"}:
