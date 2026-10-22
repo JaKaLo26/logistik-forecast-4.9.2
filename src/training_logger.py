@@ -124,8 +124,11 @@ def _download_existing_jsonl(
                 if line.strip()
             ]
 
-    except Exception:
-        return []
+    except Exception as exc:
+        # Never treat network/authentication errors as an empty dataset.
+        if type(exc).__name__ == "EntryNotFoundError":
+            return []
+        raise
 
 
 def _append_hf_jsonl(
@@ -596,7 +599,7 @@ def _segment_record(
     }
 
 
-def log_forecast(
+def _legacy_log_forecast(
     forecast: Dict[str, Any]
 ) -> Dict[str, Any]:
     if not forecast:
@@ -918,3 +921,53 @@ if __name__ == "__main__":
             ensure_ascii=False
         )
     )
+
+
+# V2: one immutable run file; old JSONL readers remain available for migration.
+def log_forecast(forecast: Dict[str, Any]) -> Dict[str, Any]:
+    import hashlib
+    import re
+    if not forecast.get('tour_id') or not forecast.get('run_id'):
+        raise ValueError('Forecast benötigt tour_id und run_id.')
+    run_id = str(forecast['run_id'])
+    if not re.fullmatch(r'[a-zA-Z0-9_-]+', run_id):
+        raise ValueError('Ungültige run_id.')
+    rows = []
+    for segment in forecast.get('segments', []):
+        # A reused prediction keeps its own version and creation time.
+        identity = f"{forecast['tour_id']}:{segment['segment_id']}:{segment['forecast_version']}:{segment.get('prediction_created_at')}"
+        rows.append({
+            'prediction_id': hashlib.sha256(identity.encode()).hexdigest(),
+            'segment_id': segment['segment_id'],
+            'forecast_version': segment['forecast_version'],
+            'prediction_created_at': segment.get('prediction_created_at'),
+            'inputs': {key: segment.get(key) for key in ['from_stop_id','to_stop_id','from_lat','from_lon','to_lat','to_lon','departure_time','osrm_baseline_s','distance_m','planned_service_s','tomtom_success']},
+            'provider_estimates': {key: segment.get(key) if segment.get('tomtom_success') else None for key in ['tomtom_live_s','tomtom_historic_s','tomtom_no_traffic_s','tomtom_traffic_delay_s']},
+            'outputs': {key: segment.get(key) for key in ['model_forecast_s','arrival_time_forecast','model_id']},
+            # Operational state is explicitly excluded from model inputs.
+            'known_operational_state': {'actual_service_s': segment.get('actual_service_s')},
+        })
+    record = {'schema_version': 2, 'run_id': run_id, 'tour_id': forecast['tour_id'],
+              'forecast_version': forecast['forecast_version'], 'vehicle_id': forecast['vehicle_id'],
+              'vehicle_parameters': forecast.get('vehicle_parameters', {}), 'segments': rows}
+    body = json.dumps(record, ensure_ascii=False, allow_nan=False, sort_keys=True).encode()
+    relative = f'forecasts/runs/{run_id}.json'
+    target = LOCAL_DATA_DIR / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with target.open('xb') as handle:
+            handle.write(body)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except FileExistsError:
+        if target.read_bytes() != body:
+            raise ValueError('Run-ID existiert mit anderem Inhalt.')
+    result = {'success': True, 'storage': 'local', 'path': str(target), 'remote_synced': False}
+    if HF_TOKEN and HF_DATASET_REPO:
+        try:
+            HfApi(token=HF_TOKEN).upload_file(path_or_fileobj=body, path_in_repo=relative,
+                repo_id=HF_DATASET_REPO, repo_type='dataset', commit_message=f'Forecast run {run_id}')
+            result['remote_synced'] = True
+        except Exception as exc:
+            result['hf_error'] = type(exc).__name__
+    return result

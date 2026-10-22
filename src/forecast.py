@@ -13,6 +13,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from src.tomtom_routing import TomTomRoutingProvider
+from src.ml_training import predict_seconds
+from uuid import uuid4
 
 
 # ============================================================
@@ -64,6 +66,9 @@ class SegmentForecast:
 
     tomtom_success: bool
     tomtom_error: Optional[str]
+    prediction_created_at: str = ""
+    distance_m: float = 0.0
+    model_id: str = "heuristic-v1"
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -692,6 +697,8 @@ def calculate_segment_forecast(
     osrm_baseline_s: int,
 
     provider: TomTomRoutingProvider,
+    ml_bundle=None,
+    osrm_distance_m: float = 0.0,
 
     vehicle_parameters: Optional[
         Dict[str, Any]
@@ -830,6 +837,11 @@ def calculate_segment_forecast(
         )
     )
 
+    model_id = "heuristic-v1"
+    if ml_bundle is not None and osrm_baseline_s > 0 and osrm_distance_m > 0:
+        model_forecast_s = predict_seconds(ml_bundle, osrm_baseline_s, osrm_distance_m, _iso(departure_time))
+        model_id = ml_bundle["report"]["model_id"]
+
     arrival = (
         departure_time
         +
@@ -845,13 +857,13 @@ def calculate_segment_forecast(
         )
     )
 
-    actual_service_s = (
-        _actual_service_s(
-            destination_stop
-        )
-    )
+    # Future destination service is unknown at prediction time.
+    actual_service_s = None
 
     return SegmentForecast(
+        prediction_created_at=datetime.now(timezone.utc).isoformat(),
+        distance_m=osrm_distance_m,
+        model_id=model_id,
 
         tour_id=
             str(
@@ -1011,6 +1023,7 @@ def calculate_tour_forecast(
     route: Dict[str, Any],
     depot: Dict[str, Any],
     start_time: Any,
+    ml_bundle=None,
 
     api_key: Optional[str] = None,
     timeout: int = 20,
@@ -1589,6 +1602,8 @@ def calculate_tour_forecast(
 
                 provider=
                     provider,
+                ml_bundle=ml_bundle,
+                osrm_distance_m=float((route.get("legs") or [{}] * segment_count)[segment_index].get("distance", 0)) if len(route.get("legs") or []) == segment_count else 0.0,
 
                 vehicle_parameters=
                     vehicle_parameters,
@@ -1900,9 +1915,11 @@ def calculate_tour_forecast(
             segments,
     )
 
-    return (
-        tour.to_dict()
-    )
+    result = tour.to_dict()
+    result["schema_version"] = 2
+    result["run_id"] = str(uuid4())
+    result["vehicle_parameters"] = dict(vehicle_parameters or {})
+    return result
 
 
 # ============================================================
@@ -1915,6 +1932,7 @@ def recalculate_tour_from_stop(
     depot: Dict[str, Any],
 
     from_stop_id: str,
+    ml_bundle=None,
 
     new_departure_time: Optional[
         Any
@@ -2156,6 +2174,7 @@ def recalculate_tour_from_stop(
 
             route=
                 route_copy,
+            ml_bundle=ml_bundle,
 
             depot=
                 depot,
@@ -2201,6 +2220,7 @@ def segment_rows(
 ) -> List[Dict[str, Any]]:
 
     rows = []
+    baseline_clock = _parse_datetime(forecast["started_at"])
 
     for segment in (
         forecast.get(
@@ -2209,7 +2229,14 @@ def segment_rows(
         or []
     ):
 
+        baseline_clock += timedelta(seconds=_safe_int(segment.get("osrm_baseline_s")))
+        baseline_arrival = baseline_clock
+        predicted_arrival = _parse_datetime(segment["arrival_time_forecast"])
+        baseline_clock += timedelta(seconds=_safe_int(segment.get("planned_service_s")))
         rows.append({
+            "ankunft_plan_osrm": _iso(baseline_arrival),
+            "abweichung_plan_min": round((predicted_arrival-baseline_arrival).total_seconds()/60, 1),
+            "modell": segment.get("model_id", "heuristic-v1"),
 
             "segment":
                 segment.get(

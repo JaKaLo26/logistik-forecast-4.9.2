@@ -12,6 +12,8 @@ from io import StringIO
 import gradio as gr
 import pandas as pd
 import spaces
+from uuid import uuid4
+from src.ml_training import train_experiment
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -753,7 +755,8 @@ def calculate_all_forecasts(
     routes_json,
     depot_json,
     vehicle_table,
-    start_time
+    start_time,
+    ml_bundle=None
 ):
     routes = _json_load(routes_json, [])
     depot = _json_load(depot_json, {})
@@ -789,16 +792,14 @@ def calculate_all_forecasts(
             else vehicle_parameters(vehicle_rows.iloc[0])
         )
 
-        tour_id = (
-            f"{datetime.now().strftime('%Y%m%d%H%M%S')}"
-            f"-{vehicle_id}"
-        )
+        tour_id = str(uuid4())
 
         try:
             forecast = calculate_tour_forecast(
                 route=route,
                 depot=depot,
                 start_time=normalized_start,
+                ml_bundle=ml_bundle,
                 api_key=TOMTOM_API_KEY,
                 timeout=TIMEOUT,
                 tour_id=tour_id,
@@ -963,7 +964,8 @@ def reforecast_from_stop(
     vehicle_id,
     stop_id,
     actual_service_min,
-    actual_departure
+    actual_departure,
+    ml_bundle=None
 ):
     forecasts = _json_load(forecasts_json, {})
     routes = _json_load(routes_json, [])
@@ -1018,6 +1020,7 @@ def reforecast_from_stop(
     try:
         new_forecast = recalculate_tour_from_stop(
             previous_forecast=previous,
+            ml_bundle=ml_bundle,
             route=route,
             depot=depot,
             from_stop_id=str(stop_id),
@@ -1070,7 +1073,9 @@ def reforecast_from_stop(
         json.dumps(debug, ensure_ascii=False, indent=2, default=str),
         (
             f"✅ **{vehicle_id} ab Stopp {stop_id} neu berechnet. "
-            f"Forecast-Version {new_forecast.get('forecast_version')} gespeichert.**"
+            f"Forecast-Version {new_forecast.get('forecast_version')} berechnet.** "
+            f"Speicherstatus: {log_result.get('storage', 'Fehler')} · "
+            f"HF synchronisiert: {log_result.get('remote_synced', False)}"
         ),
     )
 
@@ -1142,6 +1147,7 @@ with gr.Blocks(
         "TomTom Segment-Forecast → Reforecast → ML-Dataset**"
     )
 
+    ml_state = gr.State(None)
     orders_state = gr.State("[]")
     address_state = gr.State("[]")
     candidates_state = gr.State("{}")
@@ -1346,6 +1352,32 @@ with gr.Blocks(
                 language="json"
             )
 
+
+        with gr.Tab("6 · IHK: Training & Vergleich"):
+            gr.Markdown("## Planbasis gegen ML prüfen\nCSV mit ursprünglichen Segment-Prognosen und späteren IST-Zeiten hochladen. Die letzten 20 % der Touren bilden den zeitlichen Test. Alle Segmente einer Tour bleiben zusammen. Fehlende oder zeitlich unzulässige Daten werden abgewiesen.\n\n**MAE/RMSE bewerten Segmentfahrzeiten, nicht die gesamte Ankunftskette.** Synthetische Ergebnisse belegen keine Verbesserung im realen Betrieb. Wiederholte Modellauswahl anhand dieses Tests macht einen neuen, unberührten Abschlusstest nötig.")
+            training_csv = gr.File(label="Trainingsdaten (CSV; Schema siehe README)", file_types=[".csv"], type="filepath")
+            train_button = gr.Button("Trainieren, vergleichen und für diese Sitzung laden")
+            training_status = gr.Markdown("Noch kein trainiertes Modell aktiv; Forecast nutzt die bestehende Heuristik.")
+            training_metrics = gr.Dataframe(label="Fehler auf zurückgehaltenen Touren", interactive=False)
+            training_details = gr.Dataframe(label="Plan / ML / IST je Testsegment", interactive=False)
+            training_manifest = gr.Code(label="Modell- und Split-Nachweis", language="json")
+
+    def run_training(file):
+        if not file:
+            raise gr.Error("Bitte Trainings-CSV hochladen.")
+        try:
+            bundle, metrics, details = train_experiment(pd.read_csv(file, sep=None, engine="python"))
+        except Exception as exc:
+            raise gr.Error(f"Training abgewiesen: {exc}")
+        report = bundle["report"]
+        gain = metrics.iloc[0].MAE_min - metrics.iloc[1].MAE_min
+        status = f"Modell aktiv für neue Forecasts und Reforecasts dieser Sitzung. Herkunft: **{report['data_origin']}**. MAE-Differenz Plan minus ML: **{gain:.2f} min**. Positive Werte sprechen in diesem Test für ML; keine allgemeine Gütegarantie."
+        if report['data_origin'] != 'real':
+            status += " **Nur synthetischer/simulierter Funktionsnachweis.**"
+        return bundle, status, metrics, details, json.dumps(report, ensure_ascii=False, indent=2)
+
+    train_button.click(run_training, training_csv, [ml_state, training_status, training_metrics, training_details, training_manifest])
+
     import_btn.click(
         read_csv,
         upload,
@@ -1505,7 +1537,8 @@ with gr.Blocks(
             routes_state,
             depot_state,
             vehicle_table,
-            start_time_input
+            start_time_input,
+            ml_state
         ],
         [
             forecast_table,
@@ -1539,6 +1572,7 @@ with gr.Blocks(
             reforecast_stop,
             actual_service_min,
             actual_departure_input,
+            ml_state,
         ],
         [
             reforecast_summary,
@@ -1557,3 +1591,4 @@ if __name__ == "__main__":
         server_port=int(os.getenv("PORT", "7860")),
         show_error=True,
     )
+
