@@ -1,0 +1,50 @@
+name: Deploy AI Workflow to Hugging Face
+
+on:
+  push:
+    branches:
+      - Ai-workflow
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hf-ai-workflow
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout AI workflow branch
+        uses: actions/checkout@v4
+        with:
+          ref: Ai-workflow
+          persist-credentials: false
+      - name: Install Hugging Face Hub
+        run: python -m pip install --upgrade huggingface_hub
+      - name: Publish to test Space only
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN_AI_WORKFLOW }}
+        run: |
+          if [ -z "$HF_TOKEN" ]; then
+            echo "::error::Missing HF_TOKEN_AI_WORKFLOW repository secret"
+            exit 1
+          fi
+          python - <<'PY'
+          import os
+          from huggingface_hub import HfApi
+          api = HfApi(token=os.environ["HF_TOKEN"])
+          api.upload_folder(
+              folder_path=".",
+              repo_id="JaKaLo/LogistikForecastAIWorkflow",
+              repo_type="space",
+              ignore_patterns=[
+                  ".git/*", ".github/*", "__pycache__/*", "*.pyc",
+                  ".env", ".env.*", ".venv/*", "venv/*",
+                  "*.joblib", "*.pkl", "data/private/*",
+              ],
+              commit_message="Deploy Ai-workflow branch",
+          )
+          PY
