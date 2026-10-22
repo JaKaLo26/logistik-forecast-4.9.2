@@ -1105,47 +1105,113 @@ def logger_status_markdown():
 
 
 CSS = """
-html, body { background: #0f1117 !important; }
-.gradio-container, .gradio-container > .main {
-    background: #0f1117 !important;
-    color: #f3f4f6 !important;
+html, body { background: #eef5fa !important; color-scheme: light; }
+.gradio-container {
+    min-height: 100vh; max-width: 1440px !important; margin: auto;
+    padding: 32px 28px !important;
+    background: radial-gradient(ellipse at 8% 0%, #d9f5ee 0%, transparent 45%),
+                radial-gradient(ellipse at 95% 12%, #e0e5ff 0%, transparent 42%),
+                linear-gradient(145deg, #f5fafc, #edf3fa) !important;
 }
-.gradio-container { min-height: 100vh; }
-.step-title {
-    font-size: 1.35rem;
-    font-weight: 750;
-    margin-bottom: .35rem;
+.gradio-container > .main { background: transparent !important; }
+#app-hero {
+    padding: 32px; margin-bottom: 18px; border: 1px solid white;
+    border-radius: 28px; background: linear-gradient(120deg, #ffffffdd, #ffffff80);
+    box-shadow: 0 12px 45px #355b8010, inset 0 1px 0 white;
 }
-#tour-map iframe {
-    width: 100% !important;
-    min-height: 560px !important;
-    height: 62vh !important;
-    border-radius: 12px;
+.hero-top { display: flex; justify-content: space-between; gap: 16px; align-items: center; }
+.hero-brand { font-size: 12px; font-weight: 750; letter-spacing: .16em; color: #426078; }
+.hero-badge { border: 1px solid #b7dbd3; border-radius: 99px; padding: 6px 12px; color: #246656; background: #e7f7f0; font-size: 12px; }
+#app-hero h1 { font-size: clamp(28px, 4vw, 46px); line-height: 1.15; letter-spacing: -.04em; color: #19364d; margin: 24px 0 12px; font-weight: 750; }
+#app-hero p { color: #50677c; max-width: 660px; font-size: 16px; line-height: 1.65; margin: 0; }
+.hero-pills { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 24px; }
+.hero-pills span { padding: 8px 13px; border: 1px solid #ffffff; border-radius: 99px; background: #ffffffb8; color: #3e5b70; font-size: 12px; }
+#workflow-tabs > .tab-nav {
+    display: flex; flex-wrap: wrap; gap: 6px; padding: 8px;
+    background: #ffffffb8; border: 1px solid white; border-radius: 20px;
+    box-shadow: 0 4px 18px #355b8009; margin-bottom: 18px;
 }
-#tour-map { min-height: 560px; }
+#workflow-tabs > .tab-nav button {
+    flex: 1 1 auto; min-height: 46px; border: 0; border-radius: 13px;
+    color: #476176; font-size: 13px; padding: 10px 14px; transition: background .18s ease;
+}
+#workflow-tabs > .tab-nav button[aria-selected="true"] {
+    background: #235e83 !important; color: white !important; box-shadow: 0 4px 12px #235e8326;
+}
+#workflow-tabs > .tabitem {
+    padding: 24px !important; border: 1px solid white !important; border-radius: 24px !important;
+    background: #ffffffa6 !important; box-shadow: 0 12px 36px #355b800b;
+}
+.gradio-container .block { border-radius: 16px !important; }
+.gradio-container button { min-height: 44px; }
+.gradio-container button.primary { box-shadow: 0 5px 15px #236d9220; }
+.gradio-container :is(button, input, textarea, select):focus-visible {
+    outline: 3px solid #247ca5 !important; outline-offset: 3px;
+}
+.step-intro { margin-bottom: 12px; }
+.step-intro h2 { color: #19364d; letter-spacing: -.025em; }
+.step-intro p { color: #50677c; }
+#tour-map iframe { width: 100% !important; min-height: 480px; height: 62vh; border: 0; border-radius: 20px; }
+#tour-map { min-height: 240px; }
+@supports (backdrop-filter: blur(16px)) {
+    #app-hero, #workflow-tabs > .tab-nav { backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); }
+}
 @media(max-width:768px) {
-    .gradio-container {
-        padding-left: 0 !important;
-        padding-right: 0 !important;
-    }
-    #tour-map iframe {
-        min-height: 500px !important;
-        height: 58vh !important;
-    }
+    .gradio-container { padding: 16px 10px !important; }
+    #app-hero { padding: 22px 18px; border-radius: 22px; }
+    .hero-top { flex-wrap: wrap; gap: 10px; }
+    #workflow-tabs > .tab-nav { display: grid; grid-template-columns: 1fr 1fr; }
+    #workflow-tabs > .tab-nav button { text-align: left; font-size: 12px; padding: 10px; }
+    #workflow-tabs > .tabitem { padding: 14px !important; }
+    #tour-map iframe { min-height: 360px; height: 55vh; }
+}
+@media(prefers-reduced-motion: reduce) {
+    .gradio-container *, .gradio-container *::before, .gradio-container *::after { transition: none !important; animation: none !important; }
 }
 """
 
 
+
+# Keep the requested light palette even when the host uses dark mode.
+THEME = gr.themes.Soft(
+    primary_hue="sky", secondary_hue="teal", neutral_hue="slate",
+    font=["ui-sans-serif", "system-ui", "sans-serif"],
+    font_mono=["ui-monospace", "monospace"], radius_size="lg",
+)
+_light_tokens = {
+    "body_background_fill": "#eef5fa", "body_text_color": "#243e53",
+    "body_text_color_subdued": "#52697b",
+    "background_fill_primary": "#ffffff", "background_fill_secondary": "#f0f6fa",
+    "block_background_fill": "#ffffffd9", "block_border_color": "#dbe7ee",
+    "block_label_background_fill": "#f4f8fb", "block_label_text_color": "#38566c",
+    "block_title_text_color": "#243e53", "block_info_text_color": "#52697b",
+    "input_background_fill": "#ffffff", "input_border_color": "#cbdde7",
+    "input_placeholder_color": "#657b8c", "input_background_fill_focus": "#ffffff",
+    "border_color_primary": "#dbe7ee", "border_color_accent": "#277b9e",
+    "panel_background_fill": "#f4f8fb", "panel_border_color": "#dbe7ee",
+    "button_primary_background_fill": "#235e83", "button_primary_background_fill_hover": "#194c6d",
+    "button_primary_text_color": "#ffffff", "button_primary_border_color": "#235e83",
+    "button_secondary_background_fill": "#edf5f9", "button_secondary_background_fill_hover": "#e0eef5",
+    "button_secondary_text_color": "#294e66", "button_secondary_border_color": "#cfdee8",
+    "table_text_color": "#243e53", "table_even_background_fill": "#f3f8fb",
+    "table_odd_background_fill": "#ffffff", "table_border_color": "#dbe7ee",
+    "code_background_fill": "#f1f6fa", "accordion_text_color": "#38566c",
+}
+THEME = THEME.set(**_light_tokens, **{key + "_dark": value for key, value in _light_tokens.items()})
+
 with gr.Blocks(
     title="Logistik Forecast 4.9.5",
-    css=CSS
+    css=CSS,
+    theme=THEME
 ) as demo:
 
-    gr.Markdown(
-        "# Logistik Forecast 4.9.5\n"
-        "**Adressen → Flotte → Cluster → OSRM → "
-        "TomTom Segment-Forecast → Reforecast → ML-Dataset**"
-    )
+    gr.HTML("""
+        <div class="hero-top"><span class="hero-brand">LOGISTIK / FORECAST</span><span class="hero-badge">AI Workflow · Testversion</span></div>
+        <h1>Touren planen.<br>Ankünfte besser einschätzen.</h1>
+        <p>Von der ersten Adresse bis zum datenbasierten Vergleich.
+        Plane deine Flotte, aktualisiere Prognosen und prüfe die Ergebnisse.</p>
+        <div class="hero-pills"><span>01 — Planung</span><span>02 — Forecast &amp; Reforecast</span><span>03 — Training &amp; Vergleich</span></div>
+    """, elem_id="app-hero")
 
     ml_state = gr.State(None)
     orders_state = gr.State("[]")
@@ -1160,9 +1226,10 @@ with gr.Blocks(
     selected_order_state = gr.State("")
     selected_hits_state = gr.State("[]")
 
-    with gr.Tabs():
+    with gr.Tabs(elem_id="workflow-tabs"):
 
         with gr.Tab("1 · Aufträge & Adressen"):
+            gr.Markdown("## Aufträge & Adressen\nImportiere deine CSV und bestätige die Lieferadressen.", elem_classes=["step-intro"])
             upload = gr.File(
                 label="CSV-Datei",
                 file_types=[".csv"],
@@ -1209,6 +1276,7 @@ with gr.Blocks(
             finish_status = gr.Markdown()
 
         with gr.Tab("2 · Depot, Flotte & Regionen"):
+            gr.Markdown("## Depot & Flotte\nLege den Startpunkt fest und verteile deine Aufträge auf passende Fahrzeuge.", elem_classes=["step-intro"])
             depot_input = gr.Textbox(
                 label="Depotadresse",
                 placeholder="z. B. Mercedesstraße 1, 70372 Stuttgart"
@@ -1263,6 +1331,7 @@ with gr.Blocks(
             )
 
         with gr.Tab("3 · Routenoptimierung"):
+            gr.Markdown("## Deine Touren im Überblick\nOptimiere die Stopp-Reihenfolge und erkunde die Routen auf der Karte.", elem_classes=["step-intro"])
             optimize_btn = gr.Button(
                 "LKW-Routen optimieren",
                 variant="primary"
@@ -1278,12 +1347,14 @@ with gr.Blocks(
                 interactive=False
             )
             map_html = gr.HTML(elem_id="tour-map")
-            routing_debug = gr.Code(
-                label="Routing-Debug",
-                language="json"
-            )
+            with gr.Accordion("Technische Details", open=False):
+                routing_debug = gr.Code(
+                    label="Routing-Debug",
+                    language="json"
+                )
 
         with gr.Tab("4 · Dynamischer Forecast"):
+            gr.Markdown("## Vorausschauend unterwegs\nBerechne die erwarteten Fahrzeiten und Ankünfte für deine geplanten Touren.", elem_classes=["step-intro"])
             gr.Markdown(
                 "🟢 **TomTom API konfiguriert**"
                 if TOMTOM_API_KEY
@@ -1308,12 +1379,14 @@ with gr.Blocks(
                 label="Forecast je Streckenabschnitt",
                 wrap=True
             )
-            traffic_debug = gr.Code(
-                label="Forecast / Logging Debug",
-                language="json"
-            )
+            with gr.Accordion("Technische Details", open=False):
+                traffic_debug = gr.Code(
+                    label="Forecast / Logging Debug",
+                    language="json"
+                )
 
         with gr.Tab("5 · Reforecast ab Stopp"):
+            gr.Markdown("## Neue Situation. Neue Prognose.\nAktualisiere die verbleibende Tour mit den Informationen am erreichten Stopp.", elem_classes=["step-intro"])
             reforecast_vehicle = gr.Dropdown(
                 choices=[],
                 label="LKW",
@@ -1347,16 +1420,17 @@ with gr.Blocks(
                 wrap=True
             )
             reforecast_md = gr.Markdown()
-            reforecast_debug = gr.Code(
-                label="Reforecast-Debug",
-                language="json"
-            )
+            with gr.Accordion("Technische Details", open=False):
+                reforecast_debug = gr.Code(
+                    label="Reforecast-Debug",
+                    language="json"
+                )
 
 
         with gr.Tab("6 · IHK: Training & Vergleich"):
             gr.Markdown("## Planbasis gegen ML prüfen\nCSV mit ursprünglichen Segment-Prognosen und späteren IST-Zeiten hochladen. Die letzten 20 % der Touren bilden den zeitlichen Test. Alle Segmente einer Tour bleiben zusammen. Fehlende oder zeitlich unzulässige Daten werden abgewiesen.\n\n**MAE/RMSE bewerten Segmentfahrzeiten, nicht die gesamte Ankunftskette.** Synthetische Ergebnisse belegen keine Verbesserung im realen Betrieb. Wiederholte Modellauswahl anhand dieses Tests macht einen neuen, unberührten Abschlusstest nötig.")
             training_csv = gr.File(label="Trainingsdaten (CSV; Schema siehe README)", file_types=[".csv"], type="filepath")
-            train_button = gr.Button("Trainieren, vergleichen und für diese Sitzung laden")
+            train_button = gr.Button("Trainieren, vergleichen und für diese Sitzung laden", variant="primary")
             training_status = gr.Markdown("Noch kein trainiertes Modell aktiv; Forecast nutzt die bestehende Heuristik.")
             training_metrics = gr.Dataframe(label="Fehler auf zurückgehaltenen Touren", interactive=False)
             training_details = gr.Dataframe(label="Plan / ML / IST je Testsegment", interactive=False)
