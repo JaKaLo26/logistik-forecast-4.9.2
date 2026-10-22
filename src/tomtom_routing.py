@@ -58,6 +58,7 @@ class TomTomSegmentResult:
     traffic_length_m: int
 
     success: bool
+    geometry: Optional[list] = None
 
     error: Optional[str] = None
     raw: Optional[Dict[str, Any]] = None
@@ -442,7 +443,7 @@ class TomTomRoutingProvider:
                 else "false",
 
             "routeRepresentation":
-                "summaryOnly",
+                "polyline",
         }
 
         # ----------------------------------------------------
@@ -643,6 +644,12 @@ class TomTomRoutingProvider:
                 )
             )
 
+            geometry = [
+                (float(point["latitude"]), float(point["longitude"]))
+                for leg in route.get("legs", [])
+                for point in leg.get("points", [])
+            ]
+
             return TomTomSegmentResult(
                 from_lat=
                     origin_lat,
@@ -685,6 +692,8 @@ class TomTomRoutingProvider:
 
                 success=
                     True,
+
+                geometry=geometry,
 
                 error=
                     None,
