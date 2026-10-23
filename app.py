@@ -1262,7 +1262,6 @@ with gr.Blocks(
                 interactive=False,
                 wrap=True
             )
-            geocode_btn = gr.Button("Adressen automatisch prüfen")
             address_status_md = gr.Markdown()
             address_table = gr.Dataframe(
                 headers=[
@@ -1472,13 +1471,13 @@ with gr.Blocks(
 
     train_button.click(run_training, training_csv, [ml_state, training_status, training_metrics, training_details, training_manifest])
 
-    import_btn.click(
+    import_event = import_btn.click(
         read_csv,
         upload,
         [orders_table, order_summary, orders_state]
     )
 
-    geocode_event = geocode_btn.click(
+    geocode_event = import_event.success(
         geocode_all,
         orders_state,
         [
