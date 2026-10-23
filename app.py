@@ -1176,6 +1176,20 @@ html, body { background: #eef5fa !important; color-scheme: light; }
 @supports (backdrop-filter: blur(16px)) {
     #app-hero, #workflow-tabs > .tab-nav { backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); }
 }
+/* Prevent wide Gradio rows, dataframes and embedded content from clipping mobile view. */
+.gradio-container, .gradio-container * { box-sizing: border-box; }
+.gradio-container { width: 100% !important; max-width: 100vw !important; min-width: 0 !important; }
+.gradio-container :is(.gr-row, .gr-column, .gr-group, .gr-form, .gr-panel, .block, .wrap, .contain) { min-width: 0 !important; max-width: 100%; }
+.gradio-container :is(.table-wrap, .dataframe, .overflow-x-auto) { max-width: 100%; overflow-x: auto !important; -webkit-overflow-scrolling: touch; }
+.gradio-container :is(img, iframe, svg) { max-width: 100%; }
+@media(max-width:768px) {
+    .gradio-container :is(.gr-row, .gradio-row) { flex-wrap: wrap !important; }
+    .gradio-container :is(.gr-column, .gradio-column) { min-width: 0 !important; flex: 1 1 100% !important; width: 100% !important; }
+    #workflow-tabs > .tab-nav { min-width: 0; width: 100%; }
+    #workflow-tabs > .tab-nav button { min-width: 0; overflow-wrap: anywhere; }
+    #workflow-tabs > .tabitem { min-width: 0; max-width: 100%; }
+    #tour-map, #tour-map iframe { width: 100% !important; max-width: 100% !important; }
+}
 @media(max-width:768px) {
     .gradio-container { padding: 16px 10px !important; }
     #app-hero { padding: 22px 18px; border-radius: 22px; }
