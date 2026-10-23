@@ -56,7 +56,7 @@ LARGE = {"class": "40 t", "pallet_capacity": 33, "payload_kg": 24000}
 def _read_json(payload: str) -> pd.DataFrame:
     if not payload or str(payload).strip() in {"", "[]", "null"}:
         return pd.DataFrame()
-    return pd.read_json(StringIO(payload), orient="records")
+    return pd.read_json(StringIO(payload), orient="records", dtype=False)
 
 
 def _json_load(payload, default):
@@ -199,9 +199,9 @@ def read_csv(file):
 
     try:
         try:
-            df = pd.read_csv(file, sep=None, engine="python", encoding="utf-8-sig")
+            df = pd.read_csv(file, sep=None, engine="python", encoding="utf-8-sig", dtype=str)
         except UnicodeDecodeError:
-            df = pd.read_csv(file, sep=None, engine="python", encoding="cp1252")
+            df = pd.read_csv(file, sep=None, engine="python", encoding="cp1252", dtype=str)
 
         if df.empty:
             raise gr.Error("CSV ist leer.")
@@ -231,13 +231,27 @@ def geocode_all(orders_json):
     geocoder = Geocoder(TIMEOUT)
     full_rows = []
     candidates = {}
+    failures = 0
+
+    yield (
+        pd.DataFrame(columns=["auftrag", "kunde", "adresse", "status", "treffer", "sicherheit"]),
+        "[]",
+        "{}",
+        f"**Adressprüfung gestartet: 0 / {len(orders)} Adressen.** Die Adressdienste werden abgefragt.",
+    )
 
     for _, row in orders.iterrows():
         oid = str(row["auftrag"])
-        hits = _prepare_candidates(
-            oid,
-            geocoder.search(row["adresse"], 5),
-        )
+        error = ""
+        try:
+            hits = _prepare_candidates(
+                oid,
+                geocoder.search(row["adresse"], 5),
+            )
+        except (RuntimeError, ValueError, TypeError, KeyError) as exc:
+            hits = []
+            error = str(exc)
+            failures += 1
         candidates[oid] = hits
         best = hits[0] if hits else None
 
@@ -258,16 +272,22 @@ def geocode_all(orders_json):
             "lat": best.get("lat") if best else None,
             "lon": best.get("lon") if best else None,
             "provider": best.get("provider", "") if best else "",
+            "geocoding_error": error,
         })
 
-    full = pd.DataFrame(full_rows)
-
-    return (
-        address_visible(full),
-        full.to_json(orient="records", force_ascii=False),
-        json.dumps(candidates, ensure_ascii=False),
-        address_status(full),
-    )
+        full = pd.DataFrame(full_rows)
+        progress = f"**{len(full_rows)} / {len(orders)} Adressen bearbeitet.** "
+        if failures:
+            progress += (
+                f"⚠️ Adressdienst bei {failures} Adresse(n) fehlgeschlagen. "
+                "Diese Adressen bitte unten einzeln erneut suchen. "
+            )
+        yield (
+            address_visible(full),
+            full.to_json(orient="records", force_ascii=False),
+            json.dumps(candidates, ensure_ascii=False),
+            progress + address_status(full),
+        )
 
 
 def address_visible(full):
@@ -1469,7 +1489,7 @@ with gr.Blocks(
         ],
     )
 
-    geocode_event.then(
+    geocode_event.success(
         prepare_review,
         [address_state, candidates_state],
         [
@@ -1660,6 +1680,7 @@ with gr.Blocks(
 
 
 if __name__ == "__main__":
+    demo.queue()
     demo.launch(
         server_name="0.0.0.0",
         server_port=int(os.getenv("PORT", "7860")),
