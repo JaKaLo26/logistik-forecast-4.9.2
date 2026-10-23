@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from src.capacity import normalize_orders, summarize_orders
-from src.clustering import cluster_orders
+from src.clustering import cluster_orders, DRIVER_DEFAULTS, plan_day
 from src.geocoding import Geocoder
 from src.routing import OSRMRouter
 from src.maps import build_map
@@ -145,6 +145,7 @@ def make_fleet(n_small=3, n_large=3):
             **SMALL,
             "color": COLORS[idx % len(COLORS)],
             "available": True,
+            **DRIVER_DEFAULTS,
         })
         idx += 1
 
@@ -154,6 +155,7 @@ def make_fleet(n_small=3, n_large=3):
             **LARGE,
             "color": COLORS[idx % len(COLORS)],
             "available": True,
+            **DRIVER_DEFAULTS,
         })
         idx += 1
 
@@ -601,8 +603,8 @@ def create_clusters(geo_json, vehicle_table, depot_json):
     )
 
     msg = (
-        "✅ Geografische Cluster erstellt. "
-        "Jeder LKW erhält ein möglichst zusammenhängendes Liefergebiet."
+        "✅ Straßenbasierte Cluster mit Zeitbudget erstellt. "
+        "Fahrzeit, Service, Pausen und Rückweg wurden eingeplant."
     )
 
     if warnings:
@@ -659,7 +661,16 @@ def optimize_routes(cluster_json, vehicle_table, depot_json):
         stops = [row.to_dict() for _, row in group.iterrows()]
 
         try:
-            result = router.optimize_roundtrip(depot_coord, stops)
+            stops = sorted(stops, key=lambda stop: stop.get("cluster_sequence", 0))
+            result = router.route([depot_coord] + [(float(s["lat"]), float(s["lon"])) for s in stops] + [depot_coord])
+            result["ordered_stops"] = stops
+            result["optimizer"] = "street-time-feasible-insertion"
+            if len(result.get("legs", [])) != len(stops) + 1:
+                raise ValueError("Unvollständige Fahrzeitdaten für Zeitprüfung.")
+            driver_plan = plan_day([leg["duration"] / 60 for leg in result["legs"]],
+                                   [float(s.get("service_min", 0)) for s in stops], vehicle_row)
+            if not driver_plan["feasible"]:
+                raise ValueError("Aktuelle Straßenroute überschreitet Fahrerbudget. Regionen erneut bilden.")
         except Exception as exc:
             debug.append({"vehicle_id": vid, "error": str(exc)})
             continue
@@ -703,6 +714,7 @@ def optimize_routes(cluster_json, vehicle_table, depot_json):
             "distance_m": float(result["distance_m"]),
             "duration_s": float(result["duration_s"]),
             "optimizer": result.get("optimizer", "osrm-trip"),
+            "driver_plan": driver_plan,
         })
 
         debug.append({
@@ -726,7 +738,8 @@ def optimize_routes(cluster_json, vehicle_table, depot_json):
         json.dumps(routes, ensure_ascii=False),
         json.dumps(debug, ensure_ascii=False, indent=2, default=str),
         (
-            "✅ Stoppreihenfolge mit OSRM optimiert. "
+            "✅ Straßenroute und Fahrerbudget geprüft; Cluster-Reihenfolge beibehalten. "
+            "Pausen sind Zeitreserven ohne geprüfte Parkplätze. Forecast-Ankünfte enthalten diese Pausen noch nicht. "
             "Als Nächstes kann der segmentweise TomTom-Forecast berechnet werden."
         ),
     )
@@ -1349,6 +1362,7 @@ with gr.Blocks(
                 interactive=True,
                 wrap=True,
             )
+            gr.Markdown("**Fahrerbudgets je LKW in Minuten bearbeiten.** Standard ist ein angenommener frischer Fahrer: 540 Min. Lenkzeit, 480 Min. Restarbeitszeit, 780 Min. bis zum Beginn der regulären Tagesruhe. `remaining_duty_min` muss bereits geleistete Arbeit seit der letzten Ruhe berücksichtigen. Wochen-/Doppelwochen-Restlenkzeit und `minutes_until_weekly_rest` aus der Fahrerhistorie eintragen. `drive_since_break_min` / `work_since_break_min` erfassen Vorzeiten. Keine automatische Freigabe von Ausnahmen oder verkürzter Ruhe. **Entladen zählt als Arbeit.** Pausen werden konservativ mit 45 Minuten eingeplant; Parkplätze, Zeitfenster und vollständige arbeitsrechtliche Historie sind nicht geprüft. OSRM liefert kein LKW-spezifisches Profil. Forecast-Ankünfte berücksichtigen diese Planpausen noch nicht.")
             cluster_btn = gr.Button(
                 "Regionen bilden & LKW zuweisen",
                 variant="primary"
@@ -1699,4 +1713,5 @@ if __name__ == "__main__":
         server_port=int(os.getenv("PORT", "7860")),
         show_error=True,
     )
+
 

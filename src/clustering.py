@@ -1,230 +1,169 @@
+"""Street-time clustering and conservative single-day planning, not legal certification.
+Normal 9h driving / 11h daily rest policy; no reduced rest or 10h extensions.
+Driver budgets must be supplied from actual records. Breaks are time allowances,
+not verified parking locations. Source: EC 561/2006 arts. 6–8, Directive 2002/15.
+"""
 from __future__ import annotations
-
 import math
-from dataclasses import dataclass
+import os
 import pandas as pd
 
-
-EARTH_RADIUS_KM = 6371.0088
-
-
-def haversine_km(a: tuple[float, float], b: tuple[float, float]) -> float:
-    lat1, lon1 = map(math.radians, a)
-    lat2, lon2 = map(math.radians, b)
-    dlat = lat2 - lat1
-    dlon = lon2 - lon1
-    h = (
-        math.sin(dlat / 2) ** 2
-        + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
-    )
-    return 2 * EARTH_RADIUS_KM * math.asin(math.sqrt(h))
+DRIVER_DEFAULTS = {
+    'remaining_drive_min': 540, 'remaining_work_min': 480,
+    'remaining_duty_min': 780, 'drive_since_break_min': 0,
+    'work_since_break_min': 0, 'remaining_week_drive_min': 3360,
+    'remaining_fortnight_drive_min': 5400,
+    'minutes_until_weekly_rest': 780,
+}
 
 
-def _window_midpoint(row) -> float | None:
-    """Zeitfenster-Mittelpunkt in Minuten; None, falls nicht gepflegt."""
-    start = row.get("zeitfenster_von")
-    end = row.get("zeitfenster_bis")
-    if pd.isna(start) or pd.isna(end) or not str(start).strip() or not str(end).strip():
-        return None
-
-    def parse(value):
-        parts = str(value).strip().split(":")
-        if len(parts) < 2:
-            return None
-        return int(parts[0]) * 60 + int(parts[1])
-
-    try:
-        a, b = parse(start), parse(end)
-        if a is None or b is None:
-            return None
-        return (a + b) / 2
-    except Exception:
-        return None
+def number(value, label):
+    value = float(value)
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f'{label}: endliche, nicht negative Zahl erforderlich.')
+    return value
 
 
-def _vehicle_score(v) -> float:
-    # Beide Kapazitätsdimensionen einbeziehen.
-    return float(v["pallet_capacity"]) + float(v["payload_kg"]) / 1000.0
-
-
-def _cluster_centroid(rows: list[dict]) -> tuple[float, float]:
-    return (
-        sum(float(r["lat"]) for r in rows) / len(rows),
-        sum(float(r["lon"]) for r in rows) / len(rows),
-    )
-
-
-def _estimated_cluster_km(rows: list[dict], depot: tuple[float, float]) -> float:
-    """Schnelle geometrische Tourabschätzung: nearest-neighbour + Rückweg."""
-    if not rows:
-        return 0.0
-    unvisited = rows[:]
-    current = depot
-    total = 0.0
-    while unvisited:
-        nxt = min(
-            unvisited,
-            key=lambda r: haversine_km(current, (float(r["lat"]), float(r["lon"]))),
-        )
-        p = (float(nxt["lat"]), float(nxt["lon"]))
-        total += haversine_km(current, p)
-        current = p
-        unvisited.remove(nxt)
-    total += haversine_km(current, depot)
-    return total
-
-
-def cluster_orders(
-    orders: pd.DataFrame,
-    vehicles: pd.DataFrame,
-    depot: tuple[float, float],
-) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
+def plan_day(legs_min, service_min, vehicle):
+    """Account for driving and other work separately; use full 45m breaks.
+    Conservative: a break at 4.5h driving precedes any further work.
+    Daily rest is protected by a caller-supplied deadline, never reset here.
     """
-    Kapazitätsbewusste geografische Clusterbildung.
+    budget = {k: number(vehicle.get(k, v), k) for k, v in DRIVER_DEFAULTS.items()}
+    if budget['drive_since_break_min'] > 270 or budget['work_since_break_min'] > 360:
+        raise ValueError('Fahrer-Vorzeiten überschreiten das Planungsprofil; erst klären.')
+    drive = work = elapsed = pauses = 0.0
+    ds = budget['drive_since_break_min']
+    ws = budget['work_since_break_min']
+    events = []
+    for index, leg in enumerate(legs_min):
+        for kind, amount in [('drive', leg), ('service', service_min[index] if index < len(service_min) else 0)]:
+            remaining = number(amount, kind)
+            while remaining > 1e-8:
+                if ds >= 270 - 1e-8 or ws >= 360 - 1e-8:
+                    events.append({'after_elapsed_min': round(elapsed, 2), 'duration_min': 45,
+                                   'leg_index': index, 'during': kind, 'parking_verified': False})
+                    pauses += 45
+                    elapsed += 45
+                    ds = ws = 0.0
+                chunk = min(remaining, 360-ws, 270-ds if kind == 'drive' else remaining)
+                elapsed += chunk
+                work += chunk
+                ws += chunk
+                if kind == 'drive':
+                    drive += chunk
+                    ds += chunk
+                remaining -= chunk
+    limits = [min(540, budget['remaining_drive_min'], budget['remaining_week_drive_min'],
+                  budget['remaining_fortnight_drive_min']) - drive,
+              budget['remaining_work_min'] - work,
+              min(780, budget['remaining_duty_min'], budget['minutes_until_weekly_rest']) - elapsed]
+    return {'feasible': min(limits) >= -1e-8, 'fahrzeit_min': round(drive, 2),
+            'service_min': round(work-drive, 2), 'pausen_min': pauses,
+            'tourdauer_min': round(elapsed, 2), 'break_events': events}
 
-    Strategie:
-    - Nur verfügbare Fahrzeuge.
-    - Fernste noch offene Adresse wird Seed eines neuen Gebiets.
-    - Danach werden die räumlich nächstgelegenen Stopps ergänzt,
-      solange Paletten UND Nutzlast passen.
-    - Zeitfenster-Mittelpunkte wirken als leichte Zusatzstrafe,
-      damit völlig gegensätzliche Zeitfenster seltener gemischt werden.
-    - Ziel: kompakte, wenig überlappende Liefergebiete.
-    """
+
+def road_matrix(coordinates):
+    """Directed OSRM durations in batches, without a straight-line fallback."""
+    from src.routing import OSRMRouter
+    router = OSRMRouter(os.getenv('OSRM_BASE_URL', 'https://router.project-osrm.org'),
+                        int(os.getenv('REQUEST_TIMEOUT_SECONDS', '20')))
+    count = len(coordinates)
+    matrix = [[math.inf] * count for _ in coordinates]
+    for a in range(0, count, 40):
+        sources = list(range(a, min(a+40, count)))
+        for b in range(0, count, 40):
+            destinations = list(range(b, min(b+40, count)))
+            indices = list(dict.fromkeys(sources + destinations))
+            local = {original: i for i, original in enumerate(indices)}
+            url = router.base_url + '/table/v1/driving/' + router._coord_string([coordinates[i] for i in indices])
+            response = router.session.get(url, params={
+                'sources': ';'.join(str(local[i]) for i in sources),
+                'destinations': ';'.join(str(local[i]) for i in destinations),
+                'annotations': 'duration'}, timeout=router.timeout)
+            response.raise_for_status()
+            payload = response.json()
+            if payload.get('code') != 'Ok':
+                raise ValueError('Straßenmatrix nicht verfügbar; keine Luftlinien-Ersatzwerte.')
+            values = payload['durations']
+            if len(values) != len(sources) or any(len(row) != len(destinations) for row in values):
+                raise ValueError('Unvollständige Straßenmatrix.')
+            for i, source in enumerate(sources):
+                for j, target in enumerate(destinations):
+                    value = values[i][j]
+                    matrix[source][target] = math.inf if value is None else number(value, 'Straßenfahrzeit') / 60
+    return matrix
+
+
+def cluster_orders(orders, vehicles, depot, durations=None):
+    columns = list(orders.columns) + ['cluster_id', 'vehicle_id', 'cluster_sequence']
+    empty = pd.DataFrame(columns=list(dict.fromkeys(columns)))
     if orders.empty:
-        return orders.copy(), pd.DataFrame(), ["Keine Aufträge vorhanden."]
-
-    vehicles = vehicles.copy()
-    if "available" in vehicles.columns:
-        vehicles = vehicles[vehicles["available"].astype(bool)].copy()
-    if vehicles.empty:
-        return pd.DataFrame(), pd.DataFrame(), ["Keine verfügbaren Fahrzeuge."]
-
-    for c in ["pallet_capacity", "payload_kg"]:
-        vehicles[c] = pd.to_numeric(vehicles[c], errors="raise")
-
-    rows = [r.to_dict() for _, r in orders.iterrows()]
-    for r in rows:
-        r["_window_mid"] = _window_midpoint(r)
-
-    # Große Fahrzeuge zuerst, damit entfernte Gebiete nicht künstlich zersplittern.
-    vehicle_records = (
-        vehicles.sort_values(
-            by=["pallet_capacity", "payload_kg"],
-            ascending=False,
-        )
-        .to_dict("records")
-    )
-
-    unassigned = rows[:]
-    assignments: list[dict] = []
-    cluster_summaries: list[dict] = []
-    warnings: list[str] = []
-    cluster_no = 1
-
-    for vehicle in vehicle_records:
-        if not unassigned:
-            break
-
-        cap_p = int(vehicle["pallet_capacity"])
-        cap_w = float(vehicle["payload_kg"])
-
-        feasible_seeds = [
-            r for r in unassigned
-            if int(r["paletten"]) <= cap_p and float(r["gesamtgewicht_kg"]) <= cap_w
-        ]
-        if not feasible_seeds:
-            continue
-
-        # Farthest-first: Außenregionen werden sauber voneinander getrennt.
-        seed = max(
-            feasible_seeds,
-            key=lambda r: haversine_km(
-                depot, (float(r["lat"]), float(r["lon"]))
-            ),
-        )
-
-        cluster = [seed]
-        used_p = int(seed["paletten"])
-        used_w = float(seed["gesamtgewicht_kg"])
-        unassigned.remove(seed)
-
-        while unassigned:
-            centroid = _cluster_centroid(cluster)
-            mids = [r["_window_mid"] for r in cluster if r["_window_mid"] is not None]
-            mean_mid = sum(mids) / len(mids) if mids else None
-
+        return empty, pd.DataFrame(), ['Keine Aufträge vorhanden.']
+    rows = orders.to_dict('records')
+    for row in rows:
+        for key in ('paletten', 'gesamtgewicht_kg', 'service_min'):
+            number(row[key], key)
+        if float(row['paletten']) != int(row['paletten']):
+            raise ValueError('Palettenzahl muss ganzzahlig sein.')
+    coords = [depot] + [(float(r['lat']), float(r['lon'])) for r in rows]
+    if any(not math.isfinite(lat) or not math.isfinite(lon) or abs(lat)>90 or abs(lon)>180 for lat, lon in coords):
+        raise ValueError('Ungültige Koordinaten.')
+    fleet = vehicles.to_dict('records')
+    fleet = [v for v in fleet if str(v.get('available', True)).lower() in ('true', '1', '1.0')]
+    fleet.sort(key=lambda v: (number(v['pallet_capacity'], 'Kapazität'), number(v['payload_kg'], 'Nutzlast')), reverse=True)
+    matrix = durations if durations is not None else road_matrix(coords) if fleet else None
+    open_ids = list(range(1, len(rows)+1))
+    assigned, summaries = [], []
+    warnings = ['Planung: OSRM-Straßenfahrzeiten, kein LKW-Profil und keine Verkehrsgarantie. '
+                'Fahrerbudgets sind Vorgaben, keine geprüfte Fahrerhistorie. '
+                'Zeitfenster und reale Pausenplätze müssen separat geprüft werden.']
+    def assess(seq, v):
+        path = [0] + seq + [0]
+        legs = [matrix[x][y] for x, y in zip(path, path[1:])]
+        if any(not math.isfinite(t) for t in legs):
+            return None
+        report = plan_day(legs, [rows[i-1]['service_min'] for i in seq], v)
+        return report if report['feasible'] else None
+    for vehicle in fleet:
+        sequence = []
+        used_p = used_w = 0
+        report = None
+        while open_ids:
             candidates = []
-            for r in unassigned:
-                new_p = used_p + int(r["paletten"])
-                new_w = used_w + float(r["gesamtgewicht_kg"])
-                if new_p > cap_p or new_w > cap_w:
+            for item in open_ids:
+                row = rows[item-1]
+                if used_p + row['paletten'] > float(vehicle['pallet_capacity']) or used_w + row['gesamtgewicht_kg'] > float(vehicle['payload_kg']):
                     continue
-
-                geo_km = haversine_km(
-                    centroid, (float(r["lat"]), float(r["lon"]))
-                )
-                tw_penalty = 0.0
-                if mean_mid is not None and r["_window_mid"] is not None:
-                    # 60 Minuten Zeitfenster-Abstand ≈ 3 km Zusatzkosten.
-                    tw_penalty = abs(r["_window_mid"] - mean_mid) * 0.05
-
-                # Leichter Depot-Radialitätsbonus verhindert kreuzende Gebiete.
-                radial = abs(
-                    haversine_km(depot, centroid)
-                    - haversine_km(
-                        depot, (float(r["lat"]), float(r["lon"]))
-                    )
-                ) * 0.10
-
-                candidates.append((geo_km + tw_penalty + radial, r))
-
+                if not sequence:
+                    trial = assess([item], vehicle)
+                    if trial:
+                        candidates.append((-matrix[0][item], item, [item], trial))
+                else:
+                    # Cheapest feasible insertion using directed road times.
+                    for position in range(len(sequence)+1):
+                        seq = sequence[:position] + [item] + sequence[position:]
+                        trial = assess(seq, vehicle)
+                        if trial:
+                            candidates.append((trial['tourdauer_min'] - report['tourdauer_min'], item, seq, trial))
             if not candidates:
                 break
-
-            _, chosen = min(candidates, key=lambda x: x[0])
-            cluster.append(chosen)
-            used_p += int(chosen["paletten"])
-            used_w += float(chosen["gesamtgewicht_kg"])
-            unassigned.remove(chosen)
-
-        cluster_id = f"REGION-{cluster_no:02d}"
-        for r in cluster:
-            clean = {k: v for k, v in r.items() if not k.startswith("_")}
-            clean["cluster_id"] = cluster_id
-            clean["vehicle_id"] = vehicle["vehicle_id"]
-            assignments.append(clean)
-
-        cluster_summaries.append({
-            "cluster_id": cluster_id,
-            "vehicle_id": vehicle["vehicle_id"],
-            "stopps": len(cluster),
-            "paletten": used_p,
-            "paletten_kapazitaet": cap_p,
-            "paletten_auslastung_pct": round(used_p / cap_p * 100, 1) if cap_p else 0,
-            "gewicht_kg": round(used_w),
-            "nutzlast_kg": round(cap_w),
-            "gewicht_auslastung_pct": round(used_w / cap_w * 100, 1) if cap_w else 0,
-            "geschaetzte_geometrische_tour_km": round(
-                _estimated_cluster_km(cluster, depot), 1
-            ),
-        })
-        cluster_no += 1
-
-    # Fallback: nicht zuweisbare Aufträge transparent ausgeben.
-    for r in unassigned:
-        clean = {k: v for k, v in r.items() if not k.startswith("_")}
-        clean["cluster_id"] = "NICHT ZUGEWIESEN"
-        clean["vehicle_id"] = "NICHT ZUGEWIESEN"
-        assignments.append(clean)
-        warnings.append(
-            f"Auftrag {r['auftrag']} ({int(r['paletten'])} Pal., "
-            f"{int(r['gesamtgewicht_kg'])} kg) konnte keinem regionalen Cluster "
-            "innerhalb der verfügbaren Fahrzeugkapazität zugewiesen werden."
-        )
-
-    return (
-        pd.DataFrame(assignments),
-        pd.DataFrame(cluster_summaries),
-        warnings,
-    )
+            _, item, sequence, report = min(candidates, key=lambda c: (c[0], c[1]))
+            used_p += rows[item-1]['paletten']
+            used_w += rows[item-1]['gesamtgewicht_kg']
+            open_ids.remove(item)
+        if not sequence:
+            continue
+        cid = f'REGION-{len(summaries)+1:02d}'
+        for position, item in enumerate(sequence, 1):
+            assigned.append({**rows[item-1], 'cluster_id': cid, 'vehicle_id': vehicle['vehicle_id'], 'cluster_sequence': position})
+        summaries.append({'cluster_id': cid, 'vehicle_id': vehicle['vehicle_id'], 'stopps': len(sequence),
+                          'paletten': used_p, 'gewicht_kg': used_w,
+                          'paletten_auslastung_pct': round(100*used_p/float(vehicle['pallet_capacity']), 1),
+                          'gewicht_auslastung_pct': round(100*used_w/float(vehicle['payload_kg']), 1) if float(vehicle['payload_kg']) else 0,
+                          **{k:v for k,v in report.items() if k not in ('break_events', 'feasible')}})
+    for item in open_ids:
+        assigned.append({**rows[item-1], 'cluster_id': 'NICHT ZUGEWIESEN', 'vehicle_id': 'NICHT ZUGEWIESEN', 'cluster_sequence': 0})
+    if open_ids:
+        warnings.append(f'{len(open_ids)} Aufträge offen: keine zulässige Einfügung bei Straßen-, Kapazitäts- und Zeitprüfung gefunden. Kein Nachweis globaler Unlösbarkeit.')
+    return pd.DataFrame(assigned, columns=empty.columns), pd.DataFrame(summaries), warnings
