@@ -1,0 +1,36 @@
+{
+  "generator_version": "1.0.0",
+  "parameters": {
+    "tours": 100,
+    "min_stops": 3,
+    "max_stops": 8,
+    "seed": 42,
+    "min_pallets": 1,
+    "max_pallets": 3,
+    "min_service": 5,
+    "max_service": 20,
+    "pallet_goods_kg": 350
+  },
+  "mode": "demo",
+  "source": {
+    "author": "Project generator",
+    "data_origin": "synthetic",
+    "external_data_used": false
+  },
+  "endpoint": null,
+  "routing_source": null,
+  "target_definition": "Synthetic multiplicative baseline, rush-hour/load effects and Gaussian noise; never IST",
+  "transformations": [
+    {
+      "method": "Sample without replacement per tour; synthetic orders and labels",
+      "reason": "Technical feasibility demonstration",
+      "script_version": "1.0.0",
+      "rows": 538
+    }
+  ],
+  "hashes": {
+    "orders.csv": "088998164eb65d3c02534fd13902c8fe87744c4203f4cb1eb31bc19306bee074",
+    "address_pool.csv": "ab61a97233b11282fef05577a0ec522da5960607af0b85e4a9114964845ec529",
+    "segments.csv": "09613c3e4bb52e7aeeb18e6a43468140e438c673e32971abdc9c7610dcda599e"
+  }
+}
