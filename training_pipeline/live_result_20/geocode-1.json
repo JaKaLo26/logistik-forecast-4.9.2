@@ -1,0 +1,40 @@
+{
+  "query": "Mercedesstraße 100, Stuttgart, Deutschland",
+  "retrieved_at": "2026-10-28T10:08:14.678182+00:00",
+  "response": [
+    {
+      "place_id": 124237021,
+      "licence": "Data © OpenStreetMap contributors, ODbL 1.0. http://osm.org/copyright",
+      "osm_type": "relation",
+      "osm_id": 14292942,
+      "lat": "48.7882006",
+      "lon": "9.2339924",
+      "category": "tourism",
+      "type": "museum",
+      "place_rank": 30,
+      "importance": 0.3898810858579735,
+      "addresstype": "tourism",
+      "name": "Mercedes-Benz Museum",
+      "display_name": "Mercedes-Benz Museum, 100, Mercedesstraße, Wasen, Bad Cannstatt, Stuttgart, Baden-Württemberg, 70372, Deutschland",
+      "address": {
+        "tourism": "Mercedes-Benz Museum",
+        "house_number": "100",
+        "road": "Mercedesstraße",
+        "neighbourhood": "Wasen",
+        "suburb": "Bad Cannstatt",
+        "city": "Stuttgart",
+        "state": "Baden-Württemberg",
+        "ISO3166-2-lvl4": "DE-BW",
+        "postcode": "70372",
+        "country": "Deutschland",
+        "country_code": "de"
+      },
+      "boundingbox": [
+        "48.7878201",
+        "48.7885717",
+        "9.2334408",
+        "9.2345435"
+      ]
+    }
+  ]
+}

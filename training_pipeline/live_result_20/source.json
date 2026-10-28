@@ -1,0 +1,12 @@
+{
+  "author": "OpenStreetMap contributors",
+  "source_url": "https://nominatim.openstreetmap.org/search",
+  "data_version": "not provided by service",
+  "retrieved_at": "2026-10-28T10:08:21.950313+00:00",
+  "license": "ODbL 1.0",
+  "license_url": "https://www.openstreetmap.org/copyright",
+  "terms_url": "https://operations.osmfoundation.org/policies/nominatim/",
+  "transformation": "Three explicit public-place queries; returned address fields and coordinates mapped to CSV; original results preserved",
+  "script_version": "live_check-1.1",
+  "rows": 3
+}

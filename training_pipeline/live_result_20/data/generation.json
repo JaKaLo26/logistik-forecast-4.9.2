@@ -1,0 +1,60 @@
+{
+  "generator_version": "1.0.0",
+  "parameters": {
+    "tours": 20,
+    "min_stops": 2,
+    "max_stops": 2,
+    "seed": 20261028,
+    "min_pallets": 1,
+    "max_pallets": 3,
+    "min_service": 5,
+    "max_service": 20,
+    "pallet_goods_kg": 350
+  },
+  "mode": "osrm",
+  "source": {
+    "author": "OpenStreetMap contributors",
+    "source_url": "https://nominatim.openstreetmap.org/search",
+    "data_version": "not provided by service",
+    "retrieved_at": "2026-10-28T10:08:21.950313+00:00",
+    "license": "ODbL 1.0",
+    "license_url": "https://www.openstreetmap.org/copyright",
+    "terms_url": "https://operations.osmfoundation.org/policies/nominatim/",
+    "transformation": "Three explicit public-place queries; returned address fields and coordinates mapped to CSV; original results preserved",
+    "script_version": "live_check-1.1",
+    "rows": 3
+  },
+  "endpoint": "https://router.project-osrm.org",
+  "routing_source": {
+    "author": "OpenStreetMap contributors; OSRM contributors",
+    "source_url": "https://router.project-osrm.org",
+    "api_version": "v1",
+    "data_version": "not provided by service",
+    "retrieved_at": "See individual routing_snapshots/*.json",
+    "license": "OSM: ODbL 1.0; OSRM software: BSD-2-Clause",
+    "license_url": "https://www.openstreetmap.org/copyright",
+    "software_license_url": "https://github.com/Project-OSRM/osrm-backend/blob/master/LICENSE.TXT",
+    "terms_url": "https://github.com/Project-OSRM/osrm-backend/wiki/Api-usage-policy",
+    "profile": "driving; not verified for trucks"
+  },
+  "target_definition": "Synthetic multiplicative baseline, rush-hour/load effects and Gaussian noise; never IST",
+  "transformations": [
+    {
+      "method": "Sample without replacement per tour; synthetic orders and labels",
+      "reason": "Technical feasibility demonstration",
+      "script_version": "1.0.0",
+      "rows": 40
+    }
+  ],
+  "hashes": {
+    "segments.csv": "1e055e7d145140898a594624c5a2f0e40e4b45ebe27578de0400d3f0538a3136",
+    "address_pool.csv": "53f228dbd6f6981460414b5fc275d023e5f34ce7009342c25e7bc75f0f207e8a",
+    "orders.csv": "76ffad1a682df2093b3a535fea5f8111ca83d78e690abd36ccba48d874263a7a",
+    "9e0965ccf387d84cb8a1e43ac57c807058c46893120e7adc5de304427bdd59c8.json": "d7e1349a9a4edfbab20f74ffc27759f9c33aa06d640324ec42551c8fbbd3cf66",
+    "b0923ba577fe489338bb7dfa6a82ad4a77f02b3c06af642fc5cf3618231838be.json": "03a9945788919d20651ffb176dbfafdac17210c549c34f2eded903dc36c76e6a",
+    "79552d2ea16a06fed0028ef746b108c265bfbb3ca111617fa4faf364c2cd5e17.json": "ac1c7ff3171548a467df5c0fde714a279fbeea6a225da6c33f2aa0256baf4fde",
+    "889bb9df010944c4e1ca6176e1f6413fc8daa0db128b707f4c5a3b2474fac76e.json": "9bc10c44eb93c0876a866d8432e04851e52c1babe10673bedba1c354e6173b22",
+    "5a62c0ea00605b22b4695f57e73c63a69673e6e5a49a4001a40cccbfd92b2344.json": "15ddace9a5954db5b7a9d4943e9232f889177a772ecf5af4c35d8df0ea438bf7",
+    "264a2770b9ed262623f035ff6249800216da677ca5a7bbd4020abb40457def1c.json": "314b4b9f732aa4a0ffb67ddb4eb285c0f3bffd83cab407d74a9313cc93e3b6fe"
+  }
+}

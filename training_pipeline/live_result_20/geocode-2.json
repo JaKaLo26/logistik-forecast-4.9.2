@@ -1,0 +1,39 @@
+{
+  "query": "Porscheplatz 1, Stuttgart, Deutschland",
+  "retrieved_at": "2026-10-28T10:08:21.949806+00:00",
+  "response": [
+    {
+      "place_id": 122230425,
+      "licence": "Data © OpenStreetMap contributors, ODbL 1.0. http://osm.org/copyright",
+      "osm_type": "node",
+      "osm_id": 6738706004,
+      "lat": "48.8340848",
+      "lon": "9.1523551",
+      "category": "amenity",
+      "type": "parking",
+      "place_rank": 30,
+      "importance": 7.8644235904433e-05,
+      "addresstype": "amenity",
+      "name": "",
+      "display_name": "1, Porscheplatz, Zuffenhausen-Schützenbühl, Zuffenhausen, Stuttgart, Baden-Württemberg, 70435, Deutschland",
+      "address": {
+        "house_number": "1",
+        "road": "Porscheplatz",
+        "neighbourhood": "Zuffenhausen-Schützenbühl",
+        "suburb": "Zuffenhausen",
+        "city": "Stuttgart",
+        "state": "Baden-Württemberg",
+        "ISO3166-2-lvl4": "DE-BW",
+        "postcode": "70435",
+        "country": "Deutschland",
+        "country_code": "de"
+      },
+      "boundingbox": [
+        "48.8340348",
+        "48.8341348",
+        "9.1523051",
+        "9.1524051"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,48 @@
+{
+  "retrieved_at": "2026-10-28T10:09:03.743916+00:00",
+  "coordinates": "9.2339924,48.7882006;9.1523551,48.8340848",
+  "endpoint": "https://router.project-osrm.org",
+  "profile": "driving",
+  "api_version": "v1",
+  "data_version": "not provided by service",
+  "response": {
+    "code": "Ok",
+    "routes": [
+      {
+        "legs": [
+          {
+            "steps": [],
+            "weight": 4222,
+            "summary": "",
+            "duration": 936.2,
+            "distance": 9089.4
+          }
+        ],
+        "weight_name": "routability",
+        "weight": 4222,
+        "duration": 936.2,
+        "distance": 9089.4
+      }
+    ],
+    "waypoints": [
+      {
+        "hint": "u7ejgC-lIZECAAAAFgAAACoAAAAmAAAA9FU1QF71ukHk9jpCCOQnQgIAAAAWAAAAKgAAACYAAAC7KQEA3OeMAJVx6AJI5owA6XLoAgoAjw4AAAAA",
+        "location": [
+          9.234396,
+          48.787861
+        ],
+        "name": "Mercedes-Jellinek-Straße",
+        "distance": 48.07636013
+      },
+      {
+        "hint": "hzAOhciAUYwXAAAAAAAAAM8AAAAAAAAAPG0cQQAAAAA3pj9CAAAAABcAAAAAAAAAdAAAAAAAAAC7KQEAY6eLACUm6QJjp4sAJSbpAgwA7wAAAAAA",
+        "location": [
+          9.152355,
+          48.834085
+        ],
+        "name": "",
+        "distance": 0
+      }
+    ]
+  }
+}

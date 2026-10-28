@@ -1,0 +1,40 @@
+{
+  "status": "passed",
+  "tested_at": "2026-10-28T10:09:05.167244+00:00",
+  "tours": 20,
+  "unique_addresses": 3,
+  "orders": 40,
+  "live_osrm_requests": 6,
+  "http_statuses": [
+    200
+  ],
+  "split_tours": {
+    "train": 14,
+    "validation": 3,
+    "test": 3
+  },
+  "test_segments": 6,
+  "snapshot_replay_identical": true,
+  "inference_fresh_process_without_labels": true,
+  "model_bytes": 24724,
+  "model_sha256": "70ac647f09c0976fa43f45fe1fc576c66a67f018237d0ff0f8cd53cf0dde7a7c",
+  "metrics": {
+    "baseline": {
+      "MAE_s": 82.52151595620556,
+      "RMSE_s": 94.2609428722627,
+      "bias_s": -82.52034352763013
+    },
+    "model": {
+      "MAE_s": 47.924559271763975,
+      "RMSE_s": 66.54983764944703,
+      "bias_s": 36.970171369379976
+    }
+  },
+  "limitations": [
+    "Synthetic labels, not real truck accuracy",
+    "OSRM driving profile, not truck restrictions",
+    "No TomTom calls",
+    "Not a deployed Hugging Face/browser test"
+  ],
+  "transport": "Real requests with identification header and 1.1 second throttle; no response mocks"
+}

@@ -1,0 +1,48 @@
+{
+  "retrieved_at": "2026-10-28T10:08:49.547596+00:00",
+  "coordinates": "9.1831058,48.7901623;9.1523551,48.8340848",
+  "endpoint": "https://router.project-osrm.org",
+  "profile": "driving",
+  "api_version": "v1",
+  "data_version": "not provided by service",
+  "response": {
+    "code": "Ok",
+    "routes": [
+      {
+        "legs": [
+          {
+            "steps": [],
+            "weight": 4048,
+            "summary": "",
+            "duration": 762.2,
+            "distance": 6524.1
+          }
+        ],
+        "weight_name": "routability",
+        "weight": 4048,
+        "duration": 762.2,
+        "distance": 6524.1
+      }
+    ],
+    "waypoints": [
+      {
+        "hint": "wifxhrmOqYoNAAAAAAAAAAAAAAAAAAAAbhIGQQAAAAAAAAAAAAAAAA0AAAAAAAAAAAAAAAAAAAC7KQEApx2MAA566AKCH4wAknroAgAAXwAAAAAA",
+        "location": [
+          9.182631,
+          48.79003
+        ],
+        "name": "Moskauer Straße",
+        "distance": 37.87329024
+      },
+      {
+        "hint": "hzAOhciAUYwXAAAAAAAAAM8AAAAAAAAAPG0cQQAAAAA3pj9CAAAAABcAAAAAAAAAdAAAAAAAAAC7KQEAY6eLACUm6QJjp4sAJSbpAgwA7wAAAAAA",
+        "location": [
+          9.152355,
+          48.834085
+        ],
+        "name": "",
+        "distance": 0
+      }
+    ]
+  }
+}
