@@ -1,0 +1,65 @@
+[
+  {
+    "tour_id": "T000000",
+    "segment": 0,
+    "remaining_load_kg": 1125.0,
+    "predicted_s": 1002,
+    "return_to_depot": false
+  },
+  {
+    "tour_id": "T000000",
+    "segment": 1,
+    "remaining_load_kg": 750.0,
+    "predicted_s": 757,
+    "return_to_depot": false
+  },
+  {
+    "tour_id": "T000000",
+    "segment": 2,
+    "remaining_load_kg": 0,
+    "predicted_s": 1017,
+    "return_to_depot": true
+  },
+  {
+    "tour_id": "T000005",
+    "segment": 0,
+    "remaining_load_kg": 1125.0,
+    "predicted_s": 1010,
+    "return_to_depot": false
+  },
+  {
+    "tour_id": "T000005",
+    "segment": 1,
+    "remaining_load_kg": 375.0,
+    "predicted_s": 1000,
+    "return_to_depot": false
+  },
+  {
+    "tour_id": "T000005",
+    "segment": 2,
+    "remaining_load_kg": 0,
+    "predicted_s": 741,
+    "return_to_depot": true
+  },
+  {
+    "tour_id": "T000016",
+    "segment": 0,
+    "remaining_load_kg": 1500.0,
+    "predicted_s": 855,
+    "return_to_depot": false
+  },
+  {
+    "tour_id": "T000016",
+    "segment": 1,
+    "remaining_load_kg": 750.0,
+    "predicted_s": 914,
+    "return_to_depot": false
+  },
+  {
+    "tour_id": "T000016",
+    "segment": 2,
+    "remaining_load_kg": 0,
+    "predicted_s": 1024,
+    "return_to_depot": true
+  }
+]

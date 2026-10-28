@@ -2,7 +2,7 @@ name: Standalone training pipeline checks
 on:
   push:
     branches: [training-pipeline]
-    paths: ['training_pipeline/**', 'tests/test_training_pipeline.py', '.github/workflows/test-training-pipeline.yml']
+    paths: ['training_pipeline/**', 'tests/test_training_pipeline.py', 'tests/test_pipeline_forecast.py', 'src/forecast.py', 'src/ml_training.py', 'app.py', '.github/workflows/test-training-pipeline.yml']
   workflow_dispatch:
 permissions:
   contents: read
@@ -14,6 +14,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: python -m pip install -r training_pipeline/requirements.txt
+      - run: python -m pip install -r requirements.txt -r training_pipeline/requirements.txt
       - run: python -m unittest discover -s tests -p test_training_pipeline.py -v
       - run: python -c "from training_pipeline.ui import demo; assert demo.blocks"
+      - run: python -m unittest discover -s tests -p test_pipeline_forecast.py -v
+      - run: python -m unittest discover -s tests -p test_ihk.py -v
+      - run: python -m training_pipeline.integration_check --source training_pipeline/live_result_20 --out ci-integration
+      - run: python -m training_pipeline.check_app_bridge

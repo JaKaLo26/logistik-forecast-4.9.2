@@ -1,0 +1,7 @@
+auftrag,kunde,strasse,plz,ort,paletten,warengewicht_kg,service_min
+T000000-S001,Synthetischer Kunde 1,Mailänder Platz 1,70173,Stuttgart,1,350.0,6
+T000000-S002,Synthetischer Kunde 2,Mercedesstraße 100,70372,Stuttgart,2,700.0,13
+T000005-S001,Synthetischer Kunde 1,Porscheplatz 1,70435,Stuttgart,2,700.0,6
+T000005-S002,Synthetischer Kunde 2,Mailänder Platz 1,70173,Stuttgart,1,350.0,14
+T000016-S001,Synthetischer Kunde 1,Mailänder Platz 1,70173,Stuttgart,2,700.0,16
+T000016-S002,Synthetischer Kunde 2,Porscheplatz 1,70435,Stuttgart,2,700.0,5

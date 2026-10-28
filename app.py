@@ -13,7 +13,7 @@ import gradio as gr
 import pandas as pd
 import spaces
 from uuid import uuid4
-from src.ml_training import train_experiment
+from src.ml_training import train_experiment, load_forecast_model
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -799,8 +799,8 @@ def calculate_all_forecasts(
         raise gr.Error("Zuerst Routen optimieren.")
     if not depot:
         raise gr.Error("Depot fehlt.")
-    if not TOMTOM_API_KEY:
-        raise gr.Error("TOMTOM_API_KEY fehlt im Hugging-Face-Space.")
+    if not TOMTOM_API_KEY and ml_bundle is None:
+        raise gr.Error("TOMTOM_API_KEY fehlt. Alternativ ein trainiertes Pipeline-Modell laden.")
 
     normalized_start = normalize_start_time(start_time)
 
@@ -877,6 +877,8 @@ def calculate_all_forecasts(
     if not forecasts:
         raise gr.Error("Kein Forecast konnte berechnet werden.")
 
+    if not forecasts:
+        raise gr.Error("Keine Tour konnte berechnet werden: " + json.dumps(debug, ensure_ascii=False))
     summary_df = pd.DataFrame(summary_rows)
     segments_df = pd.DataFrame(segment_table_rows)
     markdown = build_forecast_markdown(summary_df)
@@ -1087,6 +1089,8 @@ def reforecast_from_stop(
             row["forecast_version"] = forecast.get("forecast_version")
             segment_table_rows.append(row)
 
+    if not forecasts:
+        raise gr.Error("Keine Tour konnte berechnet werden: " + json.dumps(debug, ensure_ascii=False))
     summary_df = pd.DataFrame(summary_rows)
     segments_df = pd.DataFrame(segment_table_rows)
 
@@ -1260,7 +1264,20 @@ with gr.Blocks(
         <div class="hero-pills"><span>01 — Planung</span><span>02 — Forecast &amp; Reforecast</span><span>03 — Training &amp; Vergleich</span></div>
     """, elem_id="app-hero")
 
+    gr.Markdown("### Gespeichertes Pipeline-Modell laden\nNur selbst erzeugte, vertrauenswürdige Joblib-Dateien verwenden.")
+    pipeline_model_file = gr.File(label="Trainiertes Modell (.joblib)", file_types=[".joblib"], type="filepath")
+    pipeline_model_button = gr.Button("Modell für Forecast und Reforecast laden")
+    pipeline_model_status = gr.Markdown("Noch kein externes Pipeline-Modell geladen.")
     ml_state = gr.State(None)
+    def activate_pipeline_model(path):
+        if not path:
+            raise gr.Error("Bitte Modelldatei auswählen.")
+        try:
+            bundle = load_forecast_model(path)
+        except Exception as exc:
+            raise gr.Error(f"Modell abgewiesen: {exc}") from exc
+        return bundle, f"Aktiv: {bundle['report']['model_id']}. Synthetischer Machbarkeitsnachweis. Gilt für neu berechnete Forecasts und Reforecasts."
+    pipeline_model_button.click(activate_pipeline_model, pipeline_model_file, [ml_state, pipeline_model_status])
     orders_state = gr.State("[]")
     address_state = gr.State("[]")
     candidates_state = gr.State("{}")
@@ -1405,7 +1422,7 @@ with gr.Blocks(
             gr.Markdown(
                 "🟢 **TomTom API konfiguriert**"
                 if TOMTOM_API_KEY
-                else "🔴 **TOMTOM_API_KEY fehlt**"
+                else "**Kein TomTom-Schlüssel: Forecast mit geladenem Pipeline-Modell und OSRM-Daten möglich.**"
             )
             logger_status_ui = gr.Markdown(logger_status_markdown())
             start_time_input = gr.Textbox(
@@ -1713,5 +1730,6 @@ if __name__ == "__main__":
         server_port=int(os.getenv("PORT", "7860")),
         show_error=True,
     )
+
 
 

@@ -1,0 +1,8 @@
+{
+  "csv_import_callback": "passed",
+  "model_load_callback": "passed",
+  "forecast_callback": "passed",
+  "segments": 9,
+  "model_id": "pipeline-70ac647f09c0976fa43f45fe1fc576c66a67f018237d0ff0f8cd53cf0dde7a7c",
+  "browser_visual_test": false
+}

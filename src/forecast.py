@@ -699,6 +699,7 @@ def calculate_segment_forecast(
     provider: TomTomRoutingProvider,
     ml_bundle=None,
     osrm_distance_m: float = 0.0,
+    remaining_load_kg: Optional[float] = None,
 
     vehicle_parameters: Optional[
         Dict[str, Any]
@@ -834,12 +835,12 @@ def calculate_segment_forecast(
 
             confidence=
                 confidence,
-        )
+        ) if ml_bundle is None else 0
     )
 
     model_id = "heuristic-v1"
-    if ml_bundle is not None and osrm_baseline_s > 0 and osrm_distance_m > 0:
-        model_forecast_s = predict_seconds(ml_bundle, osrm_baseline_s, osrm_distance_m, _iso(departure_time))
+    if ml_bundle is not None:
+        model_forecast_s = predict_seconds(ml_bundle, osrm_baseline_s, osrm_distance_m, _iso(departure_time), remaining_load_kg)
         model_id = ml_bundle["report"]["model_id"]
 
     arrival = (
@@ -1603,6 +1604,10 @@ def calculate_tour_forecast(
                 provider=
                     provider,
                 ml_bundle=ml_bundle,
+                remaining_load_kg=(sum(
+                    float(stop['warengewicht_kg']) + 25 * float(stop['paletten'])
+                    for stop in stops[segment_index:]
+                ) if ml_bundle is not None and ml_bundle.get('schema_version') else None),
                 osrm_distance_m=float((route.get("legs") or [{}] * segment_count)[segment_index].get("distance", 0)) if len(route.get("legs") or []) == segment_count else 0.0,
 
                 vehicle_parameters=
@@ -2778,3 +2783,4 @@ def forecast_summary(
                 / 60
             ),
     }
+

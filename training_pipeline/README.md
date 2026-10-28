@@ -2,7 +2,7 @@
 
 Ziel: technischer Machbarkeitsnachweis vom Tourengenerator bis zum erneut geladenen Modell.
 Dieser Ordner bleibt im Branch `training-pipeline`; keine Integration oder Zusammenführung in `main` vorgesehen.
-Die bestehende Forecast-App wird nicht geändert. Startpunkt: `Ai-workflow`, Commit c193a7a.
+Die Forecast-App kann seit dem Integrationstest vom 28.10.2026 das separat trainierte Modell laden. Startpunkt: `Ai-workflow`, Commit c193a7a.
 
 ## Start auf dem PC
 
@@ -62,7 +62,7 @@ Für größere Datenmengen einen eigenen/geeigneten OSRM-Server über `--osrm-ur
 
 Die Inferenz benötigt ausschließlich `baseline_s,distance_m,departure_hour,weekday,remaining_load_kg`.
 Sie ruft weder Generator noch Zielzeitformel auf. Das Artefakt hat einen eigenen versionierten Vertrag;
-es ist kein ungeprüfter Ersatz für das bisherige `src.ml_training`-Bundle. Die Forecast-App importiert es noch nicht.
+es ist kein ungeprüfter Ersatz für das bisherige `src.ml_training`-Bundle. Die Forecast-App lädt es über `load_forecast_model`; siehe `integration_result/README.md`.
 Andere Eingabedaten lassen sich über dasselbe `segments.csv`-Schema trainieren; reale Labels benötigen einen gesonderten Adapter und Validierungsregeln.
 
 ## Methodik und Grenzen
@@ -117,3 +117,7 @@ Die Testprognosen stehen daneben. Nur synthetische Daten, kein externer Dienstab
 
 Prüfung am 27.10.2026: sieben gezielte Tests erfolgreich, CLI-Durchlauf einschließlich separatem Inferenzprozess erfolgreich,
 Gradio-Aufbau und UI-Callback erfolgreich. OSRM wurde im automatischen Test ersetzt; kein Live-Straßendienst- oder visueller Browsertest.
+
+## Integration mit der Forecast-App
+
+Der vollständige geprüfte Ablauf und die Bedienung stehen in [integration_result/README.md](integration_result/README.md).

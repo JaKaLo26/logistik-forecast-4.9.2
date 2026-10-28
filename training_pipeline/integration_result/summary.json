@@ -1,0 +1,19 @@
+{
+  "status": "passed",
+  "source_dataset_sha256": "1e055e7d145140898a594624c5a2f0e40e4b45ebe27578de0400d3f0538a3136",
+  "train_tours": 14,
+  "validation_tours": 3,
+  "test_tours": 3,
+  "csv_orders": 6,
+  "forecast_segments": 9,
+  "model_id": "pipeline-70ac647f09c0976fa43f45fe1fc576c66a67f018237d0ff0f8cd53cf0dde7a7c",
+  "fresh_process": true,
+  "heuristic_forbidden": true,
+  "generator_forbidden": true,
+  "labels_absent_from_forecast_input": true,
+  "all_model_predictions_match": true,
+  "arrival_service_chain_verified": true,
+  "return_legs_included": true,
+  "source": "OSRM live snapshots from live_result_20; no new service calls",
+  "limitation": "Technical integration PoC, synthetic targets. No real truck accuracy, TomTom live test or browser interaction test."
+}
