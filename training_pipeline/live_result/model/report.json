@@ -1,0 +1,64 @@
+{
+  "schema_version": "1.0.0",
+  "dataset_sha256": "1c5dffb0afdfe80bb0da7a55c717262eb49bf50e47cfd2eddd6ffaf19932c762",
+  "seed": 20261028,
+  "features": [
+    "baseline_s",
+    "distance_m",
+    "departure_hour",
+    "weekday",
+    "remaining_load_kg"
+  ],
+  "splits": {
+    "train": [
+      "T000000",
+      "T000003",
+      "T000004",
+      "T000005",
+      "T000006",
+      "T000008",
+      "T000009",
+      "T000010"
+    ],
+    "validation": [
+      "T000001",
+      "T000007"
+    ],
+    "test": [
+      "T000002",
+      "T000011"
+    ]
+  },
+  "validation_candidates": [
+    {
+      "max_depth": 6,
+      "MAE_s": 126.67605813728039
+    },
+    {
+      "max_depth": 12,
+      "MAE_s": 126.67605813728039
+    }
+  ],
+  "selected_max_depth": 6,
+  "metrics": {
+    "baseline": {
+      "MAE_s": 162.62538043543702,
+      "RMSE_s": 190.84107198549435,
+      "bias_s": -162.62538043543702
+    },
+    "model": {
+      "MAE_s": 124.93377726457896,
+      "RMSE_s": 132.0870798614053,
+      "bias_s": 92.33196813802095
+    }
+  },
+  "reload_exact_match": true,
+  "versions": {
+    "python": "3.12.14",
+    "numpy": "2.3.5",
+    "pandas": "2.2.3",
+    "sklearn": "1.8.0"
+  },
+  "limitation": "Synthetic technical PoC only. No real truck accuracy claim. Random grouped split, not future generalization.",
+  "model_sha256": "95f21789cd22f50deb5df805e659507a5e9fc51c2983037742aae4a27d7c9bae"
+}

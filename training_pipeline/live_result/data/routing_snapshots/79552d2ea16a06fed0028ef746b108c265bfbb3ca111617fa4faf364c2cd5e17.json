@@ -1,0 +1,48 @@
+{
+  "retrieved_at": "2026-10-28T09:12:44.885187+00:00",
+  "coordinates": "9.2339924,48.7882006;9.1831058,48.7901623",
+  "endpoint": "https://router.project-osrm.org",
+  "profile": "driving",
+  "api_version": "v1",
+  "data_version": "not provided by service",
+  "response": {
+    "code": "Ok",
+    "routes": [
+      {
+        "legs": [
+          {
+            "steps": [],
+            "weight": 716.2,
+            "summary": "",
+            "duration": 716.2,
+            "distance": 6591.1
+          }
+        ],
+        "weight_name": "routability",
+        "weight": 716.2,
+        "duration": 716.2,
+        "distance": 6591.1
+      }
+    ],
+    "waypoints": [
+      {
+        "hint": "u7ejgC-lIZECAAAAFgAAACoAAAAmAAAA9FU1QF71ukHk9jpCCOQnQgIAAAAWAAAAKgAAACYAAAC7KQEA3OeMAJVx6AJI5owA6XLoAgoAjw4AAAAA",
+        "location": [
+          9.234396,
+          48.787861
+        ],
+        "name": "Mercedes-Jellinek-Straße",
+        "distance": 48.07636013
+      },
+      {
+        "hint": "wifxhrmOqYoNAAAAAAAAAAAAAAAAAAAAbhIGQQAAAAAAAAAAAAAAAA0AAAAAAAAAAAAAAAAAAAC7KQEApx2MAA566AKCH4wAknroAgAAXwAAAAAA",
+        "location": [
+          9.182631,
+          48.79003
+        ],
+        "name": "Moskauer Straße",
+        "distance": 37.87329024
+      }
+    ]
+  }
+}

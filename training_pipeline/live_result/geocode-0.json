@@ -1,0 +1,40 @@
+{
+  "query": "Mailänder Platz 1, Stuttgart, Deutschland",
+  "retrieved_at": "2026-10-28T09:12:06.085538+00:00",
+  "response": [
+    {
+      "place_id": 121446761,
+      "licence": "Data © OpenStreetMap contributors, ODbL 1.0. http://osm.org/copyright",
+      "osm_type": "way",
+      "osm_id": 107760990,
+      "lat": "48.7901623",
+      "lon": "9.1831058",
+      "category": "amenity",
+      "type": "library",
+      "place_rank": 30,
+      "importance": 0.21080589711721126,
+      "addresstype": "amenity",
+      "name": "Stadtbibliothek am Mailänder Platz",
+      "display_name": "Stadtbibliothek am Mailänder Platz, 1, Mailänder Platz, Europaviertel, Stuttgart-Mitte, Stuttgart, Baden-Württemberg, 70173, Deutschland",
+      "address": {
+        "amenity": "Stadtbibliothek am Mailänder Platz",
+        "house_number": "1",
+        "road": "Mailänder Platz",
+        "neighbourhood": "Europaviertel",
+        "suburb": "Stuttgart-Mitte",
+        "city": "Stuttgart",
+        "state": "Baden-Württemberg",
+        "ISO3166-2-lvl4": "DE-BW",
+        "postcode": "70173",
+        "country": "Deutschland",
+        "country_code": "de"
+      },
+      "boundingbox": [
+        "48.7899574",
+        "48.7903755",
+        "9.1827889",
+        "9.1834231"
+      ]
+    }
+  ]
+}

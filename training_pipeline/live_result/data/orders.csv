@@ -1,0 +1,25 @@
+auftrag,kunde,strasse,plz,ort,paletten,warengewicht_kg,service_min
+T000000-S001,Synthetischer Kunde 1,Mailänder Platz 1,70173,Stuttgart,1,350.0,6
+T000000-S002,Synthetischer Kunde 2,Mercedesstraße 100,70372,Stuttgart,2,700.0,13
+T000001-S001,Synthetischer Kunde 1,Mailänder Platz 1,70173,Stuttgart,2,700.0,16
+T000001-S002,Synthetischer Kunde 2,Mercedesstraße 100,70372,Stuttgart,1,350.0,18
+T000002-S001,Synthetischer Kunde 1,Mailänder Platz 1,70173,Stuttgart,1,350.0,6
+T000002-S002,Synthetischer Kunde 2,Porscheplatz 1,70435,Stuttgart,3,1050.0,9
+T000003-S001,Synthetischer Kunde 1,Mailänder Platz 1,70173,Stuttgart,1,350.0,18
+T000003-S002,Synthetischer Kunde 2,Mercedesstraße 100,70372,Stuttgart,2,700.0,6
+T000004-S001,Synthetischer Kunde 1,Mercedesstraße 100,70372,Stuttgart,2,700.0,18
+T000004-S002,Synthetischer Kunde 2,Mailänder Platz 1,70173,Stuttgart,1,350.0,15
+T000005-S001,Synthetischer Kunde 1,Porscheplatz 1,70435,Stuttgart,2,700.0,6
+T000005-S002,Synthetischer Kunde 2,Mailänder Platz 1,70173,Stuttgart,1,350.0,14
+T000006-S001,Synthetischer Kunde 1,Porscheplatz 1,70435,Stuttgart,2,700.0,10
+T000006-S002,Synthetischer Kunde 2,Mailänder Platz 1,70173,Stuttgart,1,350.0,15
+T000007-S001,Synthetischer Kunde 1,Mailänder Platz 1,70173,Stuttgart,1,350.0,16
+T000007-S002,Synthetischer Kunde 2,Mercedesstraße 100,70372,Stuttgart,2,700.0,19
+T000008-S001,Synthetischer Kunde 1,Mailänder Platz 1,70173,Stuttgart,1,350.0,15
+T000008-S002,Synthetischer Kunde 2,Mercedesstraße 100,70372,Stuttgart,2,700.0,13
+T000009-S001,Synthetischer Kunde 1,Mailänder Platz 1,70173,Stuttgart,2,700.0,19
+T000009-S002,Synthetischer Kunde 2,Porscheplatz 1,70435,Stuttgart,3,1050.0,11
+T000010-S001,Synthetischer Kunde 1,Porscheplatz 1,70435,Stuttgart,2,700.0,13
+T000010-S002,Synthetischer Kunde 2,Mailänder Platz 1,70173,Stuttgart,1,350.0,17
+T000011-S001,Synthetischer Kunde 1,Porscheplatz 1,70435,Stuttgart,3,1050.0,17
+T000011-S002,Synthetischer Kunde 2,Mercedesstraße 100,70372,Stuttgart,2,700.0,14
