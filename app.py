@@ -893,13 +893,18 @@ def calculate_all_forecasts(
         segments = forecast["segments"]
         limits = ("remaining_drive_min", "remaining_week_drive_min",
                   "remaining_fortnight_drive_min")
-        live_available = bool(segments) and all(
-            segment.get("tomtom_success")
-            and isinstance(segment.get("tomtom_live_s"), (int, float))
-            and math.isfinite(segment["tomtom_live_s"])
-            and segment["tomtom_live_s"] >= 0
+        missing_live = [
+            f"{segment.get('from_stop_name', 'Start')} → {segment.get('to_stop_name', 'Ziel')} "
+            f"({segment.get('tomtom_error') or 'kein gültiger Live-Wert'})"
             for segment in segments
-        )
+            if not (
+                segment.get("tomtom_success")
+                and isinstance(segment.get("tomtom_live_s"), (int, float))
+                and math.isfinite(segment["tomtom_live_s"])
+                and segment["tomtom_live_s"] >= 0
+            )
+        ]
+        live_available = bool(segments) and not missing_live
         if live_available:
             live_seconds = sum(segment["tomtom_live_s"] for segment in segments)
             forecast_seconds = sum(segment["model_forecast_s"] for segment in segments)
@@ -918,10 +923,10 @@ def calculate_all_forecasts(
             if budget is None:
                 driver_status = "Fahrerbudget ungültig."
             elif not live_available:
-                driver_status = "Restlenkzeit nicht verfügbar (TTLive unvollständig)."
+                driver_status = "⛔ Live-Prüfung fehlgeschlagen. " + ("; ".join(missing_live) or "Keine Abschnitte vorhanden.")
             elif driving > budget:
                 driver_status = (
-                    f"⛔ Lenkzeitbudget überschritten. "
+                    f"⛔ Lenkzeitbudget um {math.ceil(driving - budget)} min überschritten. "
                     f"TTLive: {driving:.0f} von {budget:.0f} min inklusive Rückfahrt. Tour neu planen."
                 )
             else:

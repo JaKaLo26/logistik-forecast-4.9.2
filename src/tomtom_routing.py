@@ -507,13 +507,15 @@ class TomTomRoutingProvider:
 
         try:
 
-            response = (
-                self.session.get(
-                    url,
-                    params=params,
-                    timeout=self.timeout
-                )
-            )
+            for attempt in range(2):
+                try:
+                    response = self.session.get(url, params=params, timeout=self.timeout)
+                except (requests.Timeout, requests.ConnectionError):
+                    if attempt:
+                        raise
+                    continue
+                if response.status_code < 500 or attempt:
+                    break
 
             # ------------------------------------------------
             # SPEZIFISCHE API-FEHLER
@@ -748,9 +750,10 @@ class TomTomRoutingProvider:
                     False,
 
                 error=
-                    str(
-                        exc
-                    ),
+                    f"TomTom HTTP {exc.response.status_code}"
+                    if isinstance(exc, requests.HTTPError) and exc.response is not None
+                    else str(exc) if isinstance(exc, RuntimeError)
+                    else type(exc).__name__,
 
                 raw=
                     None
