@@ -6,7 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from io import StringIO
 
 import gradio as gr
@@ -14,6 +14,7 @@ import pandas as pd
 import spaces
 from uuid import uuid4
 from src.ml_training import train_experiment
+from src.synthetic_training import generate_training_data
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -29,6 +30,7 @@ from src.forecast import (
     segment_rows,
     tour_summary,
 )
+from src.tour_progress import delivery_progress, loading_plan, progress_markdown
 from src.training_logger import log_forecast, training_logger_status
 
 TIMEOUT = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "20"))
@@ -683,6 +685,7 @@ def optimize_routes(cluster_json, vehicle_table, depot_json):
                 "vehicle_id": vid,
                 "cluster_id": stop.get("cluster_id", ""),
                 "stopp_nr": seq,
+                "ladereihenfolge": len(ordered) - seq + 1,
                 "auftrag": stop.get("auftrag", ""),
                 "kunde": stop.get("kunde", ""),
                 "adresse": stop.get("adresse", ""),
@@ -974,7 +977,8 @@ def forecast_stop_choices(forecast):
         seen.add(stop_id)
         choices.append(str(stop_id))
 
-    return choices
+    completed = forecast.get("completed_stops", 0)
+    return choices[completed:completed + 1]
 
 
 def update_reforecast_stops(forecasts_json, vehicle_id):
@@ -1027,6 +1031,11 @@ def reforecast_from_stop(
     if not route:
         raise gr.Error("Route des LKW wurde nicht gefunden.")
 
+    stops = route["stops"]
+    completed = previous.get("completed_stops", 0)
+    if completed >= len(stops) or str(stops[completed]["auftrag"]) != str(stop_id):
+        raise gr.Error("Bitte den nächsten offenen Stopp der Tour bestätigen.")
+
     vehicle_rows = vehicles[
         vehicles["vehicle_id"].astype(str) == str(vehicle_id)
     ]
@@ -1048,7 +1057,7 @@ def reforecast_from_stop(
             int(round(float(actual_service_min) * 60))
         )
 
-    departure_value = str(actual_departure or "").strip() or None
+    departure_value = str(actual_departure or "").strip() or datetime.now(timezone.utc).isoformat()
 
     try:
         new_forecast = recalculate_tour_from_stop(
@@ -1069,6 +1078,8 @@ def reforecast_from_stop(
             f"{type(exc).__name__}: {exc}"
         )
 
+    new_forecast["completed_stops"] = completed + 1
+    progress = delivery_progress(stops, completed + 1, new_forecast["segments"])
     forecasts[str(vehicle_id)] = new_forecast
 
     try:
@@ -1101,7 +1112,7 @@ def reforecast_from_stop(
     return (
         summary_df,
         segments_df,
-        build_forecast_markdown(summary_df),
+        progress_markdown(progress),
         json.dumps(forecasts, ensure_ascii=False, default=str),
         json.dumps(debug, ensure_ascii=False, indent=2, default=str),
         (
@@ -1393,6 +1404,7 @@ with gr.Blocks(
                 label="Tour anzeigen",
                 interactive=False
             )
+            loading_table = gr.Dataframe(label="Ladeplan für den ausgewählten LKW", interactive=False)
             map_html = gr.HTML(elem_id="tour-map")
             with gr.Accordion("Technische Details", open=False):
                 routing_debug = gr.Code(
@@ -1441,7 +1453,7 @@ with gr.Blocks(
             )
             reforecast_stop = gr.Dropdown(
                 choices=[],
-                label="Neuberechnung ab Stopp",
+                label="Nächster offener Stopp",
                 interactive=False
             )
             actual_service_min = gr.Number(
@@ -1451,13 +1463,14 @@ with gr.Blocks(
             )
             actual_departure_input = gr.Textbox(
                 label="Tatsächliche / neue Abfahrtszeit",
-                placeholder="2026-08-20T10:35:00+02:00"
+                placeholder="Leer lassen für jetzt oder ISO-Zeit mit Zeitzone eingeben"
             )
             reforecast_btn = gr.Button(
-                "Ab diesem Stopp neu berechnen",
+                "Stopp abgeschlossen · Resttour aktualisieren",
                 variant="primary"
             )
             reforecast_status = gr.Markdown()
+            reforecast_md = gr.Markdown()
             reforecast_summary = gr.Dataframe(
                 label="Aktuelle Forecast-Versionen",
                 wrap=True
@@ -1466,7 +1479,6 @@ with gr.Blocks(
                 label="Aktuelle Segmente",
                 wrap=True
             )
-            reforecast_md = gr.Markdown()
             with gr.Accordion("Technische Details", open=False):
                 reforecast_debug = gr.Code(
                     label="Reforecast-Debug",
@@ -1475,19 +1487,27 @@ with gr.Blocks(
 
 
         with gr.Tab("6 · IHK: Training & Vergleich"):
-            gr.Markdown("## Planbasis gegen ML prüfen\nCSV mit ursprünglichen Segment-Prognosen und späteren IST-Zeiten hochladen. Die letzten 20 % der Touren bilden den zeitlichen Test. Alle Segmente einer Tour bleiben zusammen. Fehlende oder zeitlich unzulässige Daten werden abgewiesen.\n\n**MAE/RMSE bewerten Segmentfahrzeiten, nicht die gesamte Ankunftskette.** Synthetische Ergebnisse belegen keine Verbesserung im realen Betrieb. Wiederholte Modellauswahl anhand dieses Tests macht einen neuen, unberührten Abschlusstest nötig.")
+            gr.Markdown("## Planbasis gegen ML prüfen\nAuftrags-CSV für den Offline-Test oder vorbereitete Segment-CSV hochladen. Training, Validierung und Test verwenden getrennte Touren.")
+            synthetic_seed = gr.Number(label="Zufallsstartwert für Auftrags-CSV", value=42, precision=0, minimum=0)
+            synthetic_count = gr.Number(label="Anzahl synthetischer Touren", value=30, precision=0, minimum=5, maximum=500)
             training_csv = gr.File(label="Trainingsdaten (CSV; Schema siehe README)", file_types=[".csv"], type="filepath")
             train_button = gr.Button("Trainieren, vergleichen und für diese Sitzung laden", variant="primary")
             training_status = gr.Markdown("Noch kein trainiertes Modell aktiv; Forecast nutzt die bestehende Heuristik.")
             training_metrics = gr.Dataframe(label="Fehler auf zurückgehaltenen Touren", interactive=False)
-            training_details = gr.Dataframe(label="Plan / ML / IST je Testsegment", interactive=False)
+            training_details = gr.Dataframe(label="Plan, ML und Referenz je Testsegment", interactive=False)
             training_manifest = gr.Code(label="Modell- und Split-Nachweis", language="json")
 
-    def run_training(file):
+    def run_training(file, seed, tour_count):
         if not file:
             raise gr.Error("Bitte Trainings-CSV hochladen.")
         try:
-            bundle, metrics, details = train_experiment(pd.read_csv(file, sep=None, engine="python"))
+            frame = pd.read_csv(file, sep=None, engine="python", dtype={"plz": str})
+            generator = None
+            if "auftrag" in frame.columns and "prediction_created_at" not in frame.columns:
+                frame, generator = generate_training_data(frame, seed=int(seed), tour_count=int(tour_count))
+            bundle, metrics, details = train_experiment(frame)
+            if generator:
+                bundle["report"]["generator"] = generator
         except Exception as exc:
             raise gr.Error(f"Training abgewiesen: {exc}")
         report = bundle["report"]
@@ -1497,7 +1517,7 @@ with gr.Blocks(
             status += " **Nur synthetischer/simulierter Funktionsnachweis.**"
         return bundle, status, metrics, details, json.dumps(report, ensure_ascii=False, indent=2)
 
-    train_button.click(run_training, training_csv, [ml_state, training_status, training_metrics, training_details, training_manifest])
+    train_button.click(run_training, [training_csv, synthetic_seed, synthetic_count], [ml_state, training_status, training_metrics, training_details, training_manifest])
 
     import_event = import_btn.click(
         read_csv,
@@ -1652,6 +1672,13 @@ with gr.Blocks(
         map_html,
     )
 
+    def show_loading_plan(routes_json, vehicle_id):
+        route = next((route for route in _json_load(routes_json, [])
+                      if str(route.get("vehicle_id")) == str(vehicle_id)), None)
+        return pd.DataFrame(loading_plan(route["stops"]) if route else [])
+
+    route_selector.change(show_loading_plan, [routes_state, route_selector], loading_table)
+
     forecast_btn.click(
         calculate_all_forecasts,
         [
@@ -1682,7 +1709,7 @@ with gr.Blocks(
         reforecast_stop,
     )
 
-    reforecast_btn.click(
+    reforecast_event = reforecast_btn.click(
         reforecast_from_stop,
         [
             forecasts_state,
@@ -1703,6 +1730,10 @@ with gr.Blocks(
             reforecast_debug,
             reforecast_status,
         ],
+    )
+
+    reforecast_event.success(
+        update_reforecast_stops, [forecasts_state, reforecast_vehicle], reforecast_stop
     )
 
 

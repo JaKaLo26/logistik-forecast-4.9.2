@@ -97,3 +97,20 @@ Positive Differenz `MAE Plan − MAE ML` bedeutet nur im konkreten Holdout einen
 Bei fehlender OSRM-Leg-Distanz/-Zeit bleibt die Heuristik aktiv; die konkrete `model_id` wird pro Segment gespeichert. Synthetische Daten können den Ablauf demonstrieren, aber keine Aussage über reale Einsparungen liefern. Ein wirtschaftlicher Nutzen muss später über gemessene Dispositionszeit, Pünktlichkeit und Betriebskosten bewertet werden.
 
 Tests: `python -m unittest discover -s tests -p 'test_ihk.py' -v`
+
+### Reproduzierbarer Offline-Nachweis
+
+Im Tab „IHK: Training & Vergleich“ kann auch `data/beispiel_auftraege.csv`
+direkt hochgeladen werden. Generator 1.0 zieht je Tour bis zu zehn Aufträge
+ohne Zurücklegen und verwendet deren Servicezeiten. Abfahrten liegen ab dem
+1. Januar 2026 an aufeinanderfolgenden Tagen. Streckenlängen, Planfahrzeiten
+und Zielzeiten werden offline simuliert. In diesem Modus enthält die aus
+Kompatibilitätsgründen so benannte Spalte `osrm_baseline_s` die Planzeit
+bei 45 km/h. Für den Generator erfolgen keine externen API-Aufrufe.
+Der Bericht enthält Generatorparameter, Zufallsstartwert und Datenhash.
+
+Die Pipeline teilt ganze Touren zeitlich in Training, Validierung und Test
+(ca. 60/20/20). Touren mit zu spät verfügbaren Zielwerten werden aus Training
+bzw. Validierung ausgeschlossen. Das lokal erzeugte Modell wird temporär
+gespeichert und neu geladen, bevor es die Testsegmente prognostiziert.
+Die Tabelle kennzeichnet synthetische Zielzeiten ausdrücklich.
