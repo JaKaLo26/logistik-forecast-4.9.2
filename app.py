@@ -166,10 +166,10 @@ def make_fleet(n_small=3, n_large=3):
 def update_fleet(n_small, n_large):
     df = make_fleet(max(0, int(n_small or 0)), max(0, int(n_large or 0)))
     if df.empty:
-        return df, "⚠️ Keine Fahrzeuge konfiguriert."
+        return [], "⚠️ Keine Fahrzeuge konfiguriert."
 
     return (
-        df,
+        df.to_dict("records"),
         f"**{len(df)} Fahrzeuge · {int(df.pallet_capacity.sum())} "
         f"Palettenplätze · {int(df.payload_kg.sum()):,} kg Nutzlast**",
     )
@@ -1185,13 +1185,23 @@ with gr.Blocks(
                 fleet_btn = gr.Button("Flotte aktualisieren")
 
             fleet_status = gr.Markdown()
-            vehicle_table = gr.Dataframe(
-                value=make_fleet(3, 3),
-                label="Verfügbare Fahrzeuge",
-                interactive=True,
-                wrap=True,
-            )
-            gr.Markdown("**Fahrerbudgets je LKW in Minuten bearbeiten.** Standard ist ein angenommener frischer Fahrer: 540 Min. Lenkzeit, 480 Min. Restarbeitszeit, 780 Min. bis zum Beginn der regulären Tagesruhe. `remaining_duty_min` muss bereits geleistete Arbeit seit der letzten Ruhe berücksichtigen. Wochen-/Doppelwochen-Restlenkzeit und `minutes_until_weekly_rest` aus der Fahrerhistorie eintragen. `drive_since_break_min` / `work_since_break_min` erfassen Vorzeiten. Keine automatische Freigabe von Ausnahmen oder verkürzter Ruhe. **Entladen zählt als Arbeit.** Pausen werden konservativ mit 45 Minuten eingeplant; Parkplätze, Zeitfenster und vollständige arbeitsrechtliche Historie sind nicht geprüft. OSRM liefert kein LKW-spezifisches Profil. Forecast-Ankünfte berücksichtigen diese Planpausen noch nicht.")
+            vehicle_table = gr.State(make_fleet().to_dict("records"))
+            gr.Markdown("### Verfügbare Fahrzeuge")
+
+            @gr.render(inputs=vehicle_table)
+            def render_vehicle_cards(fleet):
+                if not fleet:
+                    gr.Markdown("Keine Fahrzeuge konfiguriert.")
+                for vehicle in fleet:
+                    vehicle_id = vehicle["vehicle_id"]
+                    with gr.Group():
+                        gr.Markdown(
+                            f"**{vehicle_id} · {vehicle['class']}**  \n"
+                            f"Palettenkapazität: **{vehicle['pallet_capacity']}** · "
+                            f"Maximale Zuladung: **{vehicle['payload_kg']} kg** · "
+                            f"Verbleibende Lenkzeit: **{vehicle['remaining_drive_min']} min**"
+                        )
+
             cluster_btn = gr.Button(
                 "Regionen bilden & LKW zuweisen",
                 variant="primary"

@@ -75,6 +75,10 @@ def road_matrix(coordinates):
         for b in range(0, count, 40):
             destinations = list(range(b, min(b+40, count)))
             indices = list(dict.fromkeys(sources + destinations))
+            if len(indices) == 1:
+                # A one-point block only contains the zero-duration diagonal.
+                matrix[indices[0]][indices[0]] = 0.0
+                continue
             local = {original: i for i, original in enumerate(indices)}
             url = router.base_url + '/table/v1/driving/' + router._coord_string([coordinates[i] for i in indices])
             response = router.session.get(url, params={
