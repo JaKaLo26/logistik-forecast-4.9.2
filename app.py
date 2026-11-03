@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 from datetime import datetime, timezone
 from io import StringIO
@@ -26,11 +27,8 @@ from src.routing import OSRMRouter
 from src.maps import build_map
 from src.forecast import (
     calculate_tour_forecast,
-    recalculate_tour_from_stop,
-    segment_rows,
-    tour_summary,
 )
-from src.tour_progress import delivery_progress, loading_plan, progress_markdown
+from src.tour_progress import loading_plan
 from src.training_logger import log_forecast, training_logger_status
 
 TIMEOUT = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "20"))
@@ -808,15 +806,13 @@ def calculate_all_forecasts(
     normalized_start = normalize_start_time(start_time)
 
     forecasts = {}
-    summary_rows = []
+    driver_status = []
     segment_table_rows = []
     debug = []
     logging_results = []
-    vehicle_choices = []
 
     for route in routes:
         vehicle_id = str(route["vehicle_id"])
-        vehicle_choices.append(vehicle_id)
 
         vehicle_rows = vehicles[
             vehicles["vehicle_id"].astype(str) == vehicle_id
@@ -851,12 +847,45 @@ def calculate_all_forecasts(
             continue
 
         forecasts[vehicle_id] = forecast
-        summary_rows.append(forecast_overview_row(forecast))
+        segments = forecast["segments"]
+        limits = ("remaining_drive_min", "remaining_week_drive_min",
+                  "remaining_fortnight_drive_min")
+        if vehicle_rows.empty:
+            driver_status.append(f"⚠️ **{vehicle_id}:** Fahrerbudget fehlt.")
+        else:
+            driver = vehicle_rows.iloc[0]
+            budgets = [float(driver.get(key, DRIVER_DEFAULTS[key])) for key in limits]
+            budget = min(540, *budgets) if all(math.isfinite(v) and v >= 0 for v in budgets) else None
+            driving = sum(segment["model_forecast_s"] for segment in segments) / 60
+            if budget is None:
+                driver_status.append(f"⚠️ **{vehicle_id}:** Fahrerbudget ungültig.")
+            elif driving > budget:
+                driver_status.append(
+                    f"⛔ **{vehicle_id}: Lenkzeitbudget überschritten.** "
+                    f"{driving:.1f} von {budget:g} min inklusive Rückfahrt. Tour neu planen."
+                )
+            else:
+                driver_status.append(
+                    f"**{vehicle_id}: {budget - driving:.1f} min Restlenkzeit** "
+                    f"nach der Tour ({driving:.1f} von {budget:g} min inklusive Rückfahrt)."
+                )
 
-        for row in segment_rows(forecast):
-            row["vehicle_id"] = vehicle_id
-            row["forecast_version"] = forecast.get("forecast_version")
-            segment_table_rows.append(row)
+        for index, segment in enumerate(segments, 1):
+            def minutes(key):
+                value = segment.get(key)
+                return round(value / 60, 1) if value is not None else None
+
+            segment_table_rows.append({
+                "Lkw": vehicle_id,
+                "Abschnitt": f"{'Depot' if index == 1 else f'Stopp {index - 1}'} → "
+                             f"{'Depot' if segment['to_stop_id'] == 'DEPOT' else f'Stopp {index}'}",
+                "Ziel": segment.get("to_stop_name"),
+                "OSRM (min)": minutes("osrm_baseline_s"),
+                "Tom Tom Go Live = Ist (min)": minutes("tomtom_live_s") if segment.get("tomtom_success") else None,
+                "TomTom historisch (min)": minutes("tomtom_historic_s") if segment.get("tomtom_success") else None,
+                "Eigener Forecast (min)": minutes("model_forecast_s"),
+                "Service am Ziel (min)": minutes("planned_service_s"),
+            })
 
         try:
             log_result = log_forecast(forecast)
@@ -880,15 +909,6 @@ def calculate_all_forecasts(
     if not forecasts:
         raise gr.Error("Kein Forecast konnte berechnet werden.")
 
-    summary_df = pd.DataFrame(summary_rows)
-    segments_df = forecast_segment_table(segment_table_rows)
-    markdown = build_forecast_markdown(summary_df)
-
-    first_vehicle = vehicle_choices[0] if vehicle_choices else None
-    stop_choices = forecast_stop_choices(
-        forecasts.get(first_vehicle, {})
-    )
-
     combined_debug = {
         "forecast": debug,
         "logging": logging_results,
@@ -896,248 +916,10 @@ def calculate_all_forecasts(
     }
 
     return (
-        summary_df,
-        segments_df,
-        markdown,
-        json.dumps(forecasts, ensure_ascii=False, default=str),
+        pd.DataFrame(segment_table_rows),
+        "\n\n".join(driver_status),
         json.dumps(combined_debug, ensure_ascii=False, indent=2, default=str),
-        gr.update(
-            choices=vehicle_choices,
-            value=first_vehicle,
-            interactive=bool(vehicle_choices)
-        ),
-        gr.update(
-            choices=stop_choices,
-            value=stop_choices[0] if stop_choices else None,
-            interactive=bool(stop_choices)
-        ),
-        "✅ Segment-Forecast berechnet und Trainingslogger ausgeführt.",
-    )
-
-
-def forecast_segment_table(rows):
-    table = pd.DataFrame(rows).drop(columns=["ist_min"], errors="ignore")
-    if not table.empty:
-        table["tomtom_live_min"] = table["tomtom_live_min"].where(table["tomtom_ok"])
-    return table.rename(columns={"tomtom_live_min": "IST laut TomTom"})
-
-
-def forecast_overview_row(forecast):
-    row = tour_summary(forecast)
-    row.pop("ist_fahrzeit_min", None)
-    segments = forecast.get("segments") or []
-    live = row.pop("tomtom_live_min", None)
-    row["IST laut TomTom"] = (
-        live if segments and all(segment.get("tomtom_success") for segment in segments) else None
-    )
-    return row
-
-
-def build_forecast_markdown(summary_df):
-    if summary_df is None or summary_df.empty:
-        return "Noch kein Forecast vorhanden."
-
-    lines = [
-        "## Dynamischer Tour-Forecast 4.9.5",
-        "",
-        (
-            "Die Fahrzeit wird **zwischen jedem Stopp separat** berechnet. "
-            "Servicezeiten verschieben die Abfahrtszeit des nächsten Segments. „IST laut TomTom“ ist die Live-Schätzung als Referenz."
-        ),
-        "",
-    ]
-
-    for _, row in summary_df.iterrows():
-        reference = row["IST laut TomTom"]
-        reference_text = "nicht verfügbar" if pd.isna(reference) else f"{reference} min"
-
-        lines += [
-            f"### 🚚 {row['vehicle_id']} · Forecast V{row['forecast_version']}",
-            f"- Stopps: **{row['stopps']}**",
-            f"- Distanz: **{row['distanz_km']} km**",
-            "",
-            "**Fahrzeitvergleich**",
-            f"- 1 · OSRM Basis: **{row['osrm_basis_min']} min**",
-            f"- 2 · IST laut TomTom: **{reference_text}**",
-            f"- 3 · TomTom Historisch: **{row['tomtom_historisch_min']} min**",
-            f"- 4 · Eigener Forecast: **{row['forecast_fahrzeit_min']} min**",
-            "",
-            f"- Service geplant: **{row['service_geplant_min']} min**",
-            (
-                "- Service aktuell verwendet: "
-                f"**{row.get('service_verwendet_min', row['service_geplant_min'])} min**"
-            ),
-            f"- Forecast Gesamt: **{row['forecast_gesamt_min']} min**",
-            "",
-        ]
-
-    return "\n".join(lines)
-
-
-def forecast_stop_choices(forecast):
-    if not forecast:
-        return []
-
-    choices = []
-    seen = set()
-
-    for segment in forecast.get("segments") or []:
-        stop_id = segment.get("to_stop_id")
-
-        if (
-            not stop_id
-            or stop_id == "DEPOT"
-            or stop_id in seen
-        ):
-            continue
-
-        seen.add(stop_id)
-        choices.append(str(stop_id))
-
-    completed = forecast.get("completed_stops", 0)
-    return choices[completed:completed + 1]
-
-
-def update_reforecast_stops(forecasts_json, vehicle_id):
-    forecasts = _json_load(forecasts_json, {})
-    forecast = forecasts.get(str(vehicle_id), {})
-    choices = forecast_stop_choices(forecast)
-
-    return gr.update(
-        choices=choices,
-        value=choices[0] if choices else None,
-        interactive=bool(choices)
-    )
-
-
-def reforecast_from_stop(
-    forecasts_json,
-    routes_json,
-    depot_json,
-    vehicle_table,
-    vehicle_id,
-    stop_id,
-    actual_service_min,
-    actual_departure,
-    ml_bundle=None
-):
-    forecasts = _json_load(forecasts_json, {})
-    routes = _json_load(routes_json, [])
-    depot = _json_load(depot_json, {})
-    vehicles = pd.DataFrame(vehicle_table)
-
-    if not vehicle_id:
-        raise gr.Error("Bitte LKW auswählen.")
-    if not stop_id:
-        raise gr.Error("Bitte Stopp auswählen.")
-
-    previous = forecasts.get(str(vehicle_id))
-
-    if not previous:
-        raise gr.Error("Für diesen LKW existiert kein Forecast.")
-
-    route = next(
-        (
-            route
-            for route in routes
-            if str(route.get("vehicle_id")) == str(vehicle_id)
-        ),
-        None
-    )
-
-    if not route:
-        raise gr.Error("Route des LKW wurde nicht gefunden.")
-
-    stops = route["stops"]
-    completed = previous.get("completed_stops", 0)
-    if completed >= len(stops) or str(stops[completed]["auftrag"]) != str(stop_id):
-        raise gr.Error("Bitte den nächsten offenen Stopp der Tour bestätigen.")
-
-    vehicle_rows = vehicles[
-        vehicles["vehicle_id"].astype(str) == str(vehicle_id)
-    ]
-
-    params = (
-        {}
-        if vehicle_rows.empty
-        else vehicle_parameters(vehicle_rows.iloc[0])
-    )
-
-    service_seconds = None
-
-    if (
-        actual_service_min is not None
-        and str(actual_service_min).strip() != ""
-    ):
-        service_seconds = max(
-            0,
-            int(round(float(actual_service_min) * 60))
-        )
-
-    departure_value = str(actual_departure or "").strip() or datetime.now(timezone.utc).isoformat()
-
-    try:
-        new_forecast = recalculate_tour_from_stop(
-            previous_forecast=previous,
-            ml_bundle=ml_bundle,
-            route=route,
-            depot=depot,
-            from_stop_id=str(stop_id),
-            new_departure_time=departure_value,
-            actual_service_s=service_seconds,
-            api_key=TOMTOM_API_KEY,
-            timeout=TIMEOUT,
-            vehicle_parameters=params,
-        )
-    except Exception as exc:
-        raise gr.Error(
-            "Neuberechnung fehlgeschlagen: "
-            f"{type(exc).__name__}: {exc}"
-        )
-
-    new_forecast["completed_stops"] = completed + 1
-    progress = delivery_progress(stops, completed + 1, new_forecast["segments"])
-    forecasts[str(vehicle_id)] = new_forecast
-
-    try:
-        log_result = log_forecast(new_forecast)
-    except Exception as exc:
-        log_result = {"error": str(exc)}
-
-    summary_rows = []
-    segment_table_rows = []
-
-    for vid, forecast in forecasts.items():
-        summary_rows.append(forecast_overview_row(forecast))
-
-        for row in segment_rows(forecast):
-            row["vehicle_id"] = vid
-            row["forecast_version"] = forecast.get("forecast_version")
-            segment_table_rows.append(row)
-
-    summary_df = pd.DataFrame(summary_rows)
-    segments_df = forecast_segment_table(segment_table_rows)
-
-    debug = {
-        "reforecast_vehicle": vehicle_id,
-        "reforecast_from_stop": stop_id,
-        "new_forecast_version": new_forecast.get("forecast_version"),
-        "logging": log_result,
-        "forecast": new_forecast,
-    }
-
-    return (
-        summary_df,
-        segments_df,
-        progress_markdown(progress),
-        json.dumps(forecasts, ensure_ascii=False, default=str),
-        json.dumps(debug, ensure_ascii=False, indent=2, default=str),
-        (
-            f"✅ **{vehicle_id} ab Stopp {stop_id} neu berechnet. "
-            f"Forecast-Version {new_forecast.get('forecast_version')} berechnet.** "
-            f"Speicherstatus: {log_result.get('storage', 'Fehler')} · "
-            f"HF synchronisiert: {log_result.get('remote_synced', False)}"
-        ),
+        f"Forecast für {len(forecasts)} von {len(routes)} Touren berechnet.",
     )
 
 
@@ -1297,7 +1079,6 @@ with gr.Blocks(
     depot_state = gr.State("")
     cluster_state = gr.State("[]")
     routes_state = gr.State("[]")
-    forecasts_state = gr.State("{}")
     selected_order_state = gr.State("")
     selected_hits_state = gr.State("[]")
 
@@ -1449,12 +1230,9 @@ with gr.Blocks(
             )
             forecast_status = gr.Markdown()
             forecast_md = gr.Markdown()
-            forecast_table = gr.Dataframe(
-                label="Tourübersicht – 5 Zeitkategorien",
-                wrap=True
-            )
             segment_table = gr.Dataframe(
-                label="Forecast je Streckenabschnitt",
+                label="Fahrzeit je Abschnitt, danach Service am Ziel",
+                interactive=False,
                 wrap=True
             )
             with gr.Accordion("Technische Details", open=False):
@@ -1463,49 +1241,7 @@ with gr.Blocks(
                     language="json"
                 )
 
-        with gr.Tab("5 · Reforecast ab Stopp"):
-            gr.Markdown("## Neue Situation. Neue Prognose.\nAktualisiere die verbleibende Tour mit den Informationen am erreichten Stopp.", elem_classes=["step-intro"])
-            reforecast_vehicle = gr.Dropdown(
-                choices=[],
-                label="LKW",
-                interactive=False
-            )
-            reforecast_stop = gr.Dropdown(
-                choices=[],
-                label="Nächster offener Stopp",
-                interactive=False
-            )
-            actual_service_min = gr.Number(
-                label="Tatsächliche Servicezeit an diesem Stopp (Minuten)",
-                minimum=0,
-                precision=0,
-            )
-            actual_departure_input = gr.Textbox(
-                label="Tatsächliche / neue Abfahrtszeit",
-                placeholder="Leer lassen für jetzt oder ISO-Zeit mit Zeitzone eingeben"
-            )
-            reforecast_btn = gr.Button(
-                "Stopp abgeschlossen · Resttour aktualisieren",
-                variant="primary"
-            )
-            reforecast_status = gr.Markdown()
-            reforecast_md = gr.Markdown()
-            reforecast_summary = gr.Dataframe(
-                label="Aktuelle Forecast-Versionen",
-                wrap=True
-            )
-            reforecast_segments = gr.Dataframe(
-                label="Aktuelle Segmente",
-                wrap=True
-            )
-            with gr.Accordion("Technische Details", open=False):
-                reforecast_debug = gr.Code(
-                    label="Reforecast-Debug",
-                    language="json"
-                )
-
-
-        with gr.Tab("6 · IHK: Training & Vergleich"):
+        with gr.Tab("5 · IHK: Training & Vergleich"):
             gr.Markdown("## Planbasis gegen ML prüfen\nAuftrags-CSV für den Offline-Test oder vorbereitete Segment-CSV hochladen. Training, Validierung und Test verwenden getrennte Touren.")
             synthetic_seed = gr.Number(label="Zufallsstartwert für Auftrags-CSV", value=42, precision=0, minimum=0)
             synthetic_count = gr.Number(label="Anzahl synthetischer Touren", value=30, precision=0, minimum=5, maximum=500)
@@ -1531,7 +1267,7 @@ with gr.Blocks(
             raise gr.Error(f"Training abgewiesen: {exc}")
         report = bundle["report"]
         gain = metrics.iloc[0].MAE_min - metrics.iloc[1].MAE_min
-        status = f"Modell aktiv für neue Forecasts und Reforecasts dieser Sitzung. Herkunft: **{report['data_origin']}**. MAE-Differenz Plan minus ML: **{gain:.2f} min**. Positive Werte sprechen in diesem Test für ML; keine allgemeine Gütegarantie."
+        status = f"Modell aktiv für neue Forecasts dieser Sitzung. Herkunft: **{report['data_origin']}**. MAE-Differenz Plan minus ML: **{gain:.2f} min**. Positive Werte sprechen in diesem Test für ML; keine allgemeine Gütegarantie."
         if report['data_origin'] != 'real':
             status += " **Nur synthetischer/simulierter Funktionsnachweis.**"
         return bundle, status, metrics, details, json.dumps(report, ensure_ascii=False, indent=2)
@@ -1719,52 +1455,7 @@ with gr.Blocks(
             start_time_input,
             ml_state
         ],
-        [
-            forecast_table,
-            segment_table,
-            forecast_md,
-            forecasts_state,
-            traffic_debug,
-            reforecast_vehicle,
-            reforecast_stop,
-            forecast_status,
-        ],
-    )
-
-    reforecast_vehicle.change(
-        update_reforecast_stops,
-        [
-            forecasts_state,
-            reforecast_vehicle
-        ],
-        reforecast_stop,
-    )
-
-    reforecast_event = reforecast_btn.click(
-        reforecast_from_stop,
-        [
-            forecasts_state,
-            routes_state,
-            depot_state,
-            vehicle_table,
-            reforecast_vehicle,
-            reforecast_stop,
-            actual_service_min,
-            actual_departure_input,
-            ml_state,
-        ],
-        [
-            reforecast_summary,
-            reforecast_segments,
-            reforecast_md,
-            forecasts_state,
-            reforecast_debug,
-            reforecast_status,
-        ],
-    )
-
-    reforecast_event.success(
-        update_reforecast_stops, [forecasts_state, reforecast_vehicle], reforecast_stop
+        [segment_table, forecast_md, traffic_debug, forecast_status],
     )
 
 
