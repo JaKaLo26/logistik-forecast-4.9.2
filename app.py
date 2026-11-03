@@ -851,7 +851,7 @@ def calculate_all_forecasts(
             continue
 
         forecasts[vehicle_id] = forecast
-        summary_rows.append(tour_summary(forecast))
+        summary_rows.append(forecast_overview_row(forecast))
 
         for row in segment_rows(forecast):
             row["vehicle_id"] = vehicle_id
@@ -881,7 +881,7 @@ def calculate_all_forecasts(
         raise gr.Error("Kein Forecast konnte berechnet werden.")
 
     summary_df = pd.DataFrame(summary_rows)
-    segments_df = pd.DataFrame(segment_table_rows)
+    segments_df = forecast_segment_table(segment_table_rows)
     markdown = build_forecast_markdown(summary_df)
 
     first_vehicle = vehicle_choices[0] if vehicle_choices else None
@@ -915,6 +915,24 @@ def calculate_all_forecasts(
     )
 
 
+def forecast_segment_table(rows):
+    table = pd.DataFrame(rows).drop(columns=["ist_min"], errors="ignore")
+    if not table.empty:
+        table["tomtom_live_min"] = table["tomtom_live_min"].where(table["tomtom_ok"])
+    return table.rename(columns={"tomtom_live_min": "IST laut TomTom"})
+
+
+def forecast_overview_row(forecast):
+    row = tour_summary(forecast)
+    row.pop("ist_fahrzeit_min", None)
+    segments = forecast.get("segments") or []
+    live = row.pop("tomtom_live_min", None)
+    row["IST laut TomTom"] = (
+        live if segments and all(segment.get("tomtom_success") for segment in segments) else None
+    )
+    return row
+
+
 def build_forecast_markdown(summary_df):
     if summary_df is None or summary_df.empty:
         return "Noch kein Forecast vorhanden."
@@ -924,14 +942,14 @@ def build_forecast_markdown(summary_df):
         "",
         (
             "Die Fahrzeit wird **zwischen jedem Stopp separat** berechnet. "
-            "Servicezeiten verschieben die Abfahrtszeit des nächsten Segments."
+            "Servicezeiten verschieben die Abfahrtszeit des nächsten Segments. „IST laut TomTom“ ist die Live-Schätzung als Referenz."
         ),
         "",
     ]
 
     for _, row in summary_df.iterrows():
-        ist_value = row.get("ist_fahrzeit_min")
-        ist_text = "noch offen" if pd.isna(ist_value) else f"{ist_value} min"
+        reference = row["IST laut TomTom"]
+        reference_text = "nicht verfügbar" if pd.isna(reference) else f"{reference} min"
 
         lines += [
             f"### 🚚 {row['vehicle_id']} · Forecast V{row['forecast_version']}",
@@ -940,10 +958,9 @@ def build_forecast_markdown(summary_df):
             "",
             "**Fahrzeitvergleich**",
             f"- 1 · OSRM Basis: **{row['osrm_basis_min']} min**",
-            f"- 2 · TomTom Live: **{row['tomtom_live_min']} min**",
+            f"- 2 · IST laut TomTom: **{reference_text}**",
             f"- 3 · TomTom Historisch: **{row['tomtom_historisch_min']} min**",
             f"- 4 · Eigener Forecast: **{row['forecast_fahrzeit_min']} min**",
-            f"- 5 · IST: **{ist_text}**",
             "",
             f"- Service geplant: **{row['service_geplant_min']} min**",
             (
@@ -1091,7 +1108,7 @@ def reforecast_from_stop(
     segment_table_rows = []
 
     for vid, forecast in forecasts.items():
-        summary_rows.append(tour_summary(forecast))
+        summary_rows.append(forecast_overview_row(forecast))
 
         for row in segment_rows(forecast):
             row["vehicle_id"] = vid
@@ -1099,7 +1116,7 @@ def reforecast_from_stop(
             segment_table_rows.append(row)
 
     summary_df = pd.DataFrame(summary_rows)
-    segments_df = pd.DataFrame(segment_table_rows)
+    segments_df = forecast_segment_table(segment_table_rows)
 
     debug = {
         "reforecast_vehicle": vehicle_id,
@@ -1287,7 +1304,7 @@ with gr.Blocks(
     with gr.Tabs(elem_id="workflow-tabs"):
 
         with gr.Tab("1 · Aufträge & Adressen"):
-            gr.Markdown("## Aufträge & Adressen\nImportiere deine CSV und bestätige die Lieferadressen.", elem_classes=["step-intro"])
+            gr.Markdown("## Aufträge & Adressen\nCSV auswählen und importieren. Nur unklare Adressen brauchen deine Bestätigung.", elem_classes=["step-intro"])
             upload = gr.File(
                 label="CSV-Datei",
                 file_types=[".csv"],
@@ -1295,42 +1312,44 @@ with gr.Blocks(
             )
             import_btn = gr.Button("CSV importieren", variant="primary")
             order_summary = gr.Markdown()
-            orders_table = gr.Dataframe(
-                label="Aufträge",
-                interactive=False,
-                wrap=True
-            )
             address_status_md = gr.Markdown()
-            address_table = gr.Dataframe(
-                headers=[
-                    "auftrag", "kunde", "adresse",
-                    "status", "treffer", "sicherheit"
-                ],
-                label="Adressprüfung",
-                interactive=False,
-                wrap=True,
-            )
-            review_info = gr.Markdown("Noch keine Prüfung gestartet.")
-            review_address = gr.Textbox(
-                label="Adresse korrigieren oder ergänzen",
-                placeholder="Straße Hausnummer, PLZ Ort",
-                interactive=False,
-            )
-            search_review_btn = gr.Button(
-                "Korrigierte Adresse erneut suchen"
-            )
-            address_choice = gr.Radio(
-                choices=[],
-                label="Welche Adresse ist richtig?",
-                interactive=False
-            )
-            confirm_review_btn = gr.Button(
-                "Adresse bestätigen",
-                variant="primary"
-            )
-            confirm_status = gr.Markdown()
-            finish_addresses_btn = gr.Button("Adressprüfung abschließen")
             finish_status = gr.Markdown()
+            with gr.Accordion("Aufträge und Prüfergebnisse anzeigen", open=False):
+                orders_table = gr.Dataframe(
+                    label="Aufträge",
+                    interactive=False,
+                    wrap=True
+                )
+                address_table = gr.Dataframe(
+                    headers=[
+                        "auftrag", "kunde", "adresse",
+                        "status", "treffer", "sicherheit"
+                    ],
+                    label="Adressprüfung",
+                    interactive=False,
+                    wrap=True,
+                )
+            with gr.Group(visible=False) as address_review:
+                review_info = gr.Markdown("Noch keine Prüfung gestartet.")
+                review_address = gr.Textbox(
+                    label="Adresse korrigieren oder ergänzen",
+                    placeholder="Straße Hausnummer, PLZ Ort",
+                    interactive=False,
+                )
+                search_review_btn = gr.Button(
+                    "Korrigierte Adresse erneut suchen"
+                )
+                address_choice = gr.Radio(
+                    choices=[],
+                    label="Welche Adresse ist richtig?",
+                    interactive=False
+                )
+                confirm_review_btn = gr.Button(
+                    "Adresse bestätigen",
+                    variant="primary"
+                )
+                confirm_status = gr.Markdown()
+
 
         with gr.Tab("2 · Depot, Flotte & Regionen"):
             gr.Markdown("## Depot & Flotte\nLege den Startpunkt fest und verteile deine Aufträge auf passende Fahrzeuge.", elem_classes=["step-intro"])
@@ -1519,10 +1538,13 @@ with gr.Blocks(
 
     train_button.click(run_training, [training_csv, synthetic_seed, synthetic_count], [ml_state, training_status, training_metrics, training_details, training_manifest])
 
+    def import_orders(file):
+        return (*read_csv(file), "[]", gr.update(visible=False), "Adressen werden geprüft …")
+
     import_event = import_btn.click(
-        read_csv,
+        import_orders,
         upload,
-        [orders_table, order_summary, orders_state]
+        [orders_table, order_summary, orders_state, geo_state, address_review, finish_status]
     )
 
     geocode_event = import_event.success(
@@ -1567,7 +1589,7 @@ with gr.Blocks(
         ],
     )
 
-    confirm_review_btn.click(
+    confirm_event = confirm_review_btn.click(
         confirm_review,
         [
             address_state,
@@ -1589,11 +1611,20 @@ with gr.Blocks(
         ],
     )
 
-    finish_addresses_btn.click(
-        save_addresses,
-        [address_state, orders_state],
-        [geo_state, finish_status],
-    )
+    def update_address_readiness(addresses, orders):
+        full = _read_json(addresses)
+        pending = not full.empty and full["status"].eq("MANUELL PRÜFEN").any()
+        if full.empty or pending:
+            return "[]", "", gr.update(visible=bool(pending))
+        geocoded, status = save_addresses(addresses, orders)
+        return geocoded, status, gr.update(visible=False)
+
+    for event in (geocode_event, confirm_event):
+        event.success(
+            update_address_readiness,
+            [address_state, orders_state],
+            [geo_state, finish_status, address_review],
+        )
 
     depot_search_btn.click(
         search_depot,
