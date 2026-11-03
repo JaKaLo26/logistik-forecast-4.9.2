@@ -8,7 +8,8 @@ import hashlib
 import json
 import math
 import os
-from datetime import datetime, timezone
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from io import StringIO
 
 import gradio as gr
@@ -603,10 +604,19 @@ def create_clusters(geo_json, vehicle_table, depot_json):
         depot_coord
     )
 
-    msg = (
-        "✅ Straßenbasierte Cluster mit Zeitbudget erstellt. "
-        "Fahrzeit, Service, Pausen und Rückweg wurden eingeplant."
-    )
+    unassigned = assignments["vehicle_id"].eq("NICHT ZUGEWIESEN")
+    if unassigned.any():
+        count = int(unassigned.sum())
+        msg = (
+            f"❌ **Fehler: {count} von {len(orders)} Aufträgen konnten keinem Lkw "
+            "zugewiesen werden.** Prüfe Kapazität, Nutzlast und Fahrerzeitbudgets. "
+            "Die Routenoptimierung ist erst bei vollständiger Zuordnung möglich."
+        )
+    else:
+        msg = (
+            "✅ Straßenbasierte Cluster mit Zeitbudget erstellt. "
+            "Fahrzeit, Service, Pausen und Rückweg wurden eingeplant."
+        )
 
     if warnings:
         msg += "\n\n⚠️ " + " | ".join(warnings)
@@ -626,8 +636,9 @@ def create_clusters(geo_json, vehicle_table, depot_json):
     return (
         visible,
         summary,
-        assignments.to_json(orient="records", force_ascii=False),
+        "[]" if unassigned.any() else assignments.to_json(orient="records", force_ascii=False),
         msg,
+        "[]",
     )
 
 
@@ -635,8 +646,8 @@ def optimize_routes(cluster_json, vehicle_table, depot_json):
     clustered = _read_json(cluster_json)
     vehicles = pd.DataFrame(vehicle_table)
 
-    if clustered.empty:
-        raise gr.Error("Zuerst Cluster bilden.")
+    if clustered.empty or clustered["vehicle_id"].eq("NICHT ZUGEWIESEN").any():
+        raise gr.Error("Zuerst alle Aufträge einem Lkw zuweisen.")
 
     depot = _json_load(depot_json, {})
     depot_coord = (float(depot["lat"]), float(depot["lon"]))
@@ -761,29 +772,25 @@ def render_route(routes_json, selected, depot_json):
     return build_map(routes, depot)
 
 
-def normalize_start_time(value):
-    text = str(value or "").strip()
+TOUR_TIMEZONE = ZoneInfo("Europe/Berlin")
 
-    if not text:
-        return (
-            datetime.now()
-            .astimezone()
-            .replace(second=0, microsecond=0)
-            .isoformat()
-        )
 
-    try:
-        parsed = datetime.fromisoformat(text)
-    except Exception:
-        raise gr.Error(
-            "Startzeit bitte im ISO-Format eingeben, "
-            "z. B. 2026-08-20T07:00:00+02:00"
-        )
+def current_tour_date():
+    return datetime.now(TOUR_TIMEZONE).strftime("%d.%m.%y")
 
-    if parsed.tzinfo is None:
-        parsed = parsed.astimezone()
 
-    return parsed.replace(second=0, microsecond=0).isoformat()
+def normalize_start_time(date, time):
+    date = (date or "").strip() or current_tour_date()
+    time = (time or "").strip()
+    if not time:
+        raise gr.Error("Bitte eine Startzeit eingeben, z. B. 07:00.")
+    for date_format in ("%d.%m.%y", "%d.%m.%Y"):
+        try:
+            parsed = datetime.strptime(f"{date} {time}", f"{date_format} %H:%M")
+            return parsed.replace(tzinfo=TOUR_TIMEZONE).isoformat()
+        except ValueError:
+            continue
+    raise gr.Error("Bitte Datum und Uhrzeit wie 03.11.26 und 07:00 eingeben.")
 
 
 def render_forecast_card(vehicle_id, driver_status, segments, expanded=False):
@@ -792,7 +799,7 @@ def render_forecast_card(vehicle_id, driver_status, segments, expanded=False):
 
     fields = (
         ("OSRM", "osrm_baseline_s"),
-        ("Tom Tom Go Live = Ist", "tomtom_live_s"),
+        ("TTLive= Ist-Zeit", "tomtom_live_s"),
         ("TomTom historisch", "tomtom_historic_s"),
         ("Eigener Forecast", "model_forecast_s"),
     )
@@ -824,6 +831,7 @@ def calculate_all_forecasts(
     routes_json,
     depot_json,
     vehicle_table,
+    start_date,
     start_time,
     ml_bundle=None
 ):
@@ -838,10 +846,11 @@ def calculate_all_forecasts(
     if not TOMTOM_API_KEY:
         raise gr.Error("TOMTOM_API_KEY fehlt im Hugging-Face-Space.")
 
-    normalized_start = normalize_start_time(start_time)
+    normalized_start = normalize_start_time(start_date, start_time)
 
     forecasts = {}
     tour_cards = []
+    deviations = []
     debug = []
     logging_results = []
 
@@ -884,26 +893,44 @@ def calculate_all_forecasts(
         segments = forecast["segments"]
         limits = ("remaining_drive_min", "remaining_week_drive_min",
                   "remaining_fortnight_drive_min")
+        live_available = bool(segments) and all(
+            segment.get("tomtom_success")
+            and isinstance(segment.get("tomtom_live_s"), (int, float))
+            and math.isfinite(segment["tomtom_live_s"])
+            and segment["tomtom_live_s"] >= 0
+            for segment in segments
+        )
+        if live_available:
+            live_seconds = sum(segment["tomtom_live_s"] for segment in segments)
+            forecast_seconds = sum(segment["model_forecast_s"] for segment in segments)
+            driving = live_seconds / 60
+            delta = round((forecast_seconds - live_seconds) / 60)
+            difference = f"Abweichung eigener Forecast zu TTLive: {delta:+d} min" if delta else "Abweichung eigener Forecast zu TTLive: 0 min"
+        else:
+            difference = "Abweichung nicht verfügbar (TTLive unvollständig)."
+
         if vehicle_rows.empty:
             driver_status = "Fahrerbudget fehlt."
         else:
             driver = vehicle_rows.iloc[0]
             budgets = [float(driver.get(key, DRIVER_DEFAULTS[key])) for key in limits]
             budget = min(540, *budgets) if all(math.isfinite(v) and v >= 0 for v in budgets) else None
-            driving = sum(segment["model_forecast_s"] for segment in segments) / 60
             if budget is None:
                 driver_status = "Fahrerbudget ungültig."
+            elif not live_available:
+                driver_status = "Restlenkzeit nicht verfügbar (TTLive unvollständig)."
             elif driving > budget:
                 driver_status = (
                     f"⛔ Lenkzeitbudget überschritten. "
-                    f"{driving:.0f} von {budget:.0f} min inklusive Rückfahrt. Tour neu planen."
+                    f"TTLive: {driving:.0f} von {budget:.0f} min inklusive Rückfahrt. Tour neu planen."
                 )
             else:
                 driver_status = (
                     f"{budget - driving:.0f} min Restlenkzeit "
-                    f"nach der Tour ({driving:.0f} von {budget:.0f} min inklusive Rückfahrt)."
+                    f"nach der Tour (TTLive: {driving:.0f} von {budget:.0f} min inklusive Rückfahrt)."
                 )
 
+        deviations.append(f"- **{vehicle_id}** · {difference}")
         tour_cards.append(render_forecast_card(vehicle_id, driver_status, segments, not tour_cards))
 
         try:
@@ -936,6 +963,7 @@ def calculate_all_forecasts(
 
     return (
         "".join(tour_cards),
+        "\n".join(deviations),
         json.dumps(combined_debug, ensure_ascii=False, indent=2, default=str),
         f"Forecast für {len(forecasts)} von {len(routes)} Touren berechnet.",
     )
@@ -1248,10 +1276,9 @@ with gr.Blocks(
                 else "🔴 **TOMTOM_API_KEY fehlt**"
             )
             logger_status_ui = gr.Markdown(logger_status_markdown())
-            start_time_input = gr.Textbox(
-                label="Tourstart",
-                placeholder="2026-08-20T07:00:00+02:00"
-            )
+            with gr.Row():
+                start_date_input = gr.Textbox(label="Tourdatum", value=current_tour_date, placeholder="03.11.26")
+                start_time_input = gr.Textbox(label="Startzeit", placeholder="07:00")
             forecast_btn = gr.Button(
                 "Segment-Forecast berechnen",
                 variant="primary"
@@ -1265,6 +1292,8 @@ with gr.Blocks(
                 )
 
         with gr.Tab("5 · IHK: Training & Vergleich"):
+            gr.Markdown("## Abweichung je Lkw")
+            live_deviations = gr.Markdown("Berechne zuerst einen Forecast auf Seite 4. Der Vergleich umfasst die gesamte Tour inklusive Rückfahrt.")
             gr.Markdown("## Planbasis gegen ML prüfen\nAuftrags-CSV für den Offline-Test oder vorbereitete Segment-CSV hochladen. Training, Validierung und Test verwenden getrennte Touren.")
             synthetic_seed = gr.Number(label="Zufallsstartwert für Auftrags-CSV", value=42, precision=0, minimum=0)
             synthetic_count = gr.Number(label="Anzahl synthetischer Touren", value=30, precision=0, minimum=5, maximum=500)
@@ -1431,7 +1460,8 @@ with gr.Blocks(
             cluster_assignments,
             cluster_summary,
             cluster_state,
-            cluster_status
+            cluster_status,
+            routes_state,
         ],
     )
 
@@ -1475,10 +1505,11 @@ with gr.Blocks(
             routes_state,
             depot_state,
             vehicle_table,
+            start_date_input,
             start_time_input,
             ml_state
         ],
-        [forecast_cards, traffic_debug, forecast_status],
+        [forecast_cards, live_deviations, traffic_debug, forecast_status],
     )
 
 

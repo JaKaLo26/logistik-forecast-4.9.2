@@ -8,3 +8,5 @@ huggingface_hub>=0.24
 spaces
 
 scikit-learn>=1.5,<2
+
+tzdata
