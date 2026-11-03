@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from html import escape
 import hashlib
 import json
 import math
@@ -785,6 +786,40 @@ def normalize_start_time(value):
     return parsed.replace(second=0, microsecond=0).isoformat()
 
 
+def render_forecast_card(vehicle_id, driver_status, segments, expanded=False):
+    def minutes(value):
+        return f"{value / 60:.0f} min" if value is not None else "nicht verfügbar"
+
+    fields = (
+        ("OSRM", "osrm_baseline_s"),
+        ("Tom Tom Go Live = Ist", "tomtom_live_s"),
+        ("TomTom historisch", "tomtom_historic_s"),
+        ("Eigener Forecast", "model_forecast_s"),
+    )
+    opening = " open" if expanded else ""
+    parts = [
+        f'<details{opening} style="padding:12px;border:1px solid #64748b;border-radius:12px;margin-bottom:8px">',
+        f"<summary><strong>Lkw {escape(str(vehicle_id))}</strong> · {escape(driver_status)}</summary>",
+    ]
+    for index, segment in enumerate(segments, 1):
+        origin = "Depot" if index == 1 else f"Stopp {index - 1}"
+        destination = "Depot" if segment["to_stop_id"] == "DEPOT" else f"Stopp {index}"
+        name = escape(str(segment.get("to_stop_name") or destination))
+        predicted = minutes(segment.get("model_forecast_s"))
+        parts.append(f'<details style="padding:8px;margin-left:8px"><summary>{origin} → {destination} · {name} · Forecast {predicted}</summary>')
+        parts.append('<div style="display:flex;flex-wrap:wrap;gap:12px;padding:8px">')
+        for label, key in fields:
+            value = segment.get(key)
+            if key.startswith("tomtom_") and not segment.get("tomtom_success"):
+                value = None
+            parts.append(f"<span>{label}: <strong>{minutes(value)}</strong></span>")
+        if destination != "Depot":
+            parts.append(f"<span>Service am Ziel: <strong>{minutes(segment.get('planned_service_s'))}</strong></span>")
+        parts.append("</div></details>")
+    parts.append("</details>")
+    return "".join(parts)
+
+
 def calculate_all_forecasts(
     routes_json,
     depot_json,
@@ -806,8 +841,7 @@ def calculate_all_forecasts(
     normalized_start = normalize_start_time(start_time)
 
     forecasts = {}
-    driver_status = []
-    segment_table_rows = []
+    tour_cards = []
     debug = []
     logging_results = []
 
@@ -851,41 +885,26 @@ def calculate_all_forecasts(
         limits = ("remaining_drive_min", "remaining_week_drive_min",
                   "remaining_fortnight_drive_min")
         if vehicle_rows.empty:
-            driver_status.append(f"⚠️ **{vehicle_id}:** Fahrerbudget fehlt.")
+            driver_status = "Fahrerbudget fehlt."
         else:
             driver = vehicle_rows.iloc[0]
             budgets = [float(driver.get(key, DRIVER_DEFAULTS[key])) for key in limits]
             budget = min(540, *budgets) if all(math.isfinite(v) and v >= 0 for v in budgets) else None
             driving = sum(segment["model_forecast_s"] for segment in segments) / 60
             if budget is None:
-                driver_status.append(f"⚠️ **{vehicle_id}:** Fahrerbudget ungültig.")
+                driver_status = "Fahrerbudget ungültig."
             elif driving > budget:
-                driver_status.append(
-                    f"⛔ **{vehicle_id}: Lenkzeitbudget überschritten.** "
-                    f"{driving:.1f} von {budget:g} min inklusive Rückfahrt. Tour neu planen."
+                driver_status = (
+                    f"⛔ Lenkzeitbudget überschritten. "
+                    f"{driving:.0f} von {budget:.0f} min inklusive Rückfahrt. Tour neu planen."
                 )
             else:
-                driver_status.append(
-                    f"**{vehicle_id}: {budget - driving:.1f} min Restlenkzeit** "
-                    f"nach der Tour ({driving:.1f} von {budget:g} min inklusive Rückfahrt)."
+                driver_status = (
+                    f"{budget - driving:.0f} min Restlenkzeit "
+                    f"nach der Tour ({driving:.0f} von {budget:.0f} min inklusive Rückfahrt)."
                 )
 
-        for index, segment in enumerate(segments, 1):
-            def minutes(key):
-                value = segment.get(key)
-                return round(value / 60, 1) if value is not None else None
-
-            segment_table_rows.append({
-                "Lkw": vehicle_id,
-                "Abschnitt": f"{'Depot' if index == 1 else f'Stopp {index - 1}'} → "
-                             f"{'Depot' if segment['to_stop_id'] == 'DEPOT' else f'Stopp {index}'}",
-                "Ziel": segment.get("to_stop_name"),
-                "OSRM (min)": minutes("osrm_baseline_s"),
-                "Tom Tom Go Live = Ist (min)": minutes("tomtom_live_s") if segment.get("tomtom_success") else None,
-                "TomTom historisch (min)": minutes("tomtom_historic_s") if segment.get("tomtom_success") else None,
-                "Eigener Forecast (min)": minutes("model_forecast_s"),
-                "Service am Ziel (min)": minutes("planned_service_s"),
-            })
+        tour_cards.append(render_forecast_card(vehicle_id, driver_status, segments, not tour_cards))
 
         try:
             log_result = log_forecast(forecast)
@@ -916,8 +935,7 @@ def calculate_all_forecasts(
     }
 
     return (
-        pd.DataFrame(segment_table_rows),
-        "\n\n".join(driver_status),
+        "".join(tour_cards),
         json.dumps(combined_debug, ensure_ascii=False, indent=2, default=str),
         f"Forecast für {len(forecasts)} von {len(routes)} Touren berechnet.",
     )
@@ -1229,12 +1247,7 @@ with gr.Blocks(
                 variant="primary"
             )
             forecast_status = gr.Markdown()
-            forecast_md = gr.Markdown()
-            segment_table = gr.Dataframe(
-                label="Fahrzeit je Abschnitt, danach Service am Ziel",
-                interactive=False,
-                wrap=True
-            )
+            forecast_cards = gr.HTML()
             with gr.Accordion("Technische Details", open=False):
                 traffic_debug = gr.Code(
                     label="Forecast / Logging Debug",
@@ -1455,7 +1468,7 @@ with gr.Blocks(
             start_time_input,
             ml_state
         ],
-        [segment_table, forecast_md, traffic_debug, forecast_status],
+        [forecast_cards, traffic_debug, forecast_status],
     )
 
 
