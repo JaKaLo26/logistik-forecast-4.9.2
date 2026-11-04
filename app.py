@@ -167,7 +167,7 @@ def make_fleet(n_small=3, n_large=3):
 def update_fleet(n_small, n_large):
     df = make_fleet(max(0, int(n_small or 0)), max(0, int(n_large or 0)))
     if df.empty:
-        return [], "⚠️ Keine Fahrzeuge konfiguriert."
+        return [], "⚠️ Noch keine Touren geplant."
 
     return (
         df.to_dict("records"),
@@ -234,37 +234,20 @@ def geocode_all(orders_json):
 
     geocoder = Geocoder(TIMEOUT)
     full_rows = []
-    candidates = {}
-    failures = 0
-
-    yield (
-        pd.DataFrame(columns=["auftrag", "kunde", "adresse", "status", "treffer", "sicherheit"]),
-        "[]",
-        "{}",
-        f"**Adressprüfung gestartet: 0 / {len(orders)} Adressen.** Die Adressdienste werden abgefragt.",
-    )
+    cache = {}
 
     for _, row in orders.iterrows():
         oid = str(row["auftrag"])
         error = ""
+        key = tuple(str(row[field]).strip() for field in ("strasse", "plz", "ort"))
         try:
-            hits = _prepare_candidates(
-                oid,
-                geocoder.search(row["adresse"], 5),
-            )
+            if key not in cache:
+                cache[key] = geocoder.resolve_delivery(*key)
+            best, status = cache[key]
         except (RuntimeError, ValueError, TypeError, KeyError) as exc:
-            hits = []
+            best, status = None, "NICHT GEFUNDEN"
             error = str(exc)
-            failures += 1
-        candidates[oid] = hits
-        best = hits[0] if hits else None
-
-        if best:
-            confidence = float(best.get("confidence", 0))
-            status = "OK" if confidence >= 0.72 else "MANUELL PRÜFEN"
-        else:
-            confidence = 0.0
-            status = "MANUELL PRÜFEN"
+        confidence = float(best.get("confidence", 0)) if best else 0.0
 
         full_rows.append({
             "auftrag": oid,
@@ -280,17 +263,10 @@ def geocode_all(orders_json):
         })
 
         full = pd.DataFrame(full_rows)
-        progress = f"**{len(full_rows)} / {len(orders)} Adressen bearbeitet.** "
-        if failures:
-            progress += (
-                f"⚠️ Adressdienst bei {failures} Adresse(n) fehlgeschlagen. "
-                "Diese Adressen bitte unten einzeln erneut suchen. "
-            )
         yield (
             address_visible(full),
             full.to_json(orient="records", force_ascii=False),
-            json.dumps(candidates, ensure_ascii=False),
-            progress + address_status(full),
+            f"**{len(full_rows)} / {len(orders)} Adressen bearbeitet.** " + address_status(full),
         )
 
 
@@ -315,7 +291,7 @@ def address_status(full):
     if full.empty:
         return "Noch keine Adressen geprüft."
 
-    open_count = int((full["status"] == "MANUELL PRÜFEN").sum())
+    open_count = int((full["status"] == "NICHT GEFUNDEN").sum())
     return (
         f"**{len(full)} Adressen geprüft · "
         f"✅ {len(full) - open_count} automatisch/bestätigt · "
@@ -520,7 +496,7 @@ def save_addresses(address_state_json, orders_json):
     if full.empty:
         raise gr.Error("Keine Adressprüfung vorhanden.")
 
-    if (full["status"] == "MANUELL PRÜFEN").any():
+    if (full["status"] == "NICHT GEFUNDEN").any():
         raise gr.Error("Es sind noch Adressen offen.")
 
     merged = orders.merge(
@@ -584,25 +560,48 @@ def confirm_depot(input_address, hits_json, selected):
     )
 
 
-def create_clusters(geo_json, vehicle_table, depot_json):
+def create_clusters(geo_json, depot_json):
     orders = _read_json(geo_json)
-    vehicles = pd.DataFrame(vehicle_table)
-
     if orders.empty:
         raise gr.Error("Adressprüfung zuerst abschließen.")
-    if vehicles.empty:
-        raise gr.Error("Keine Fahrzeuge.")
     if not depot_json:
         raise gr.Error("Depot zuerst bestätigen.")
 
     depot = _json_load(depot_json, {})
     depot_coord = (float(depot["lat"]), float(depot["lon"]))
 
+    vehicles = make_fleet(0, len(orders))
     assignments, summary, warnings = cluster_orders(
         orders,
         vehicles,
         depot_coord
     )
+
+    planned_fleet = []
+    small_index = large_index = 0
+    for row in summary.to_dict("records"):
+        fits_small = (row["paletten"] <= SMALL["pallet_capacity"]
+                      and row["gewicht_kg"] <= SMALL["payload_kg"])
+        if fits_small:
+            small_index += 1
+            vehicle_id, spec = f"LKW-K{small_index:02d}", SMALL
+        else:
+            large_index += 1
+            vehicle_id, spec = f"LKW-G{large_index:02d}", LARGE
+        planned_fleet.append({
+            "vehicle_id": vehicle_id, **spec, "available": True,
+            "color": COLORS[len(planned_fleet) % len(COLORS)], **DRIVER_DEFAULTS,
+        })
+    if planned_fleet:
+        id_map = dict(zip(summary["vehicle_id"], (v["vehicle_id"] for v in planned_fleet)))
+        assignments["vehicle_id"] = assignments["vehicle_id"].replace(id_map)
+        summary["vehicle_id"] = summary["vehicle_id"].map(id_map)
+        for key, load, capacity in (
+            ("paletten_auslastung_pct", "paletten", "pallet_capacity"),
+            ("gewicht_auslastung_pct", "gewicht_kg", "payload_kg"),
+        ):
+            summary[key] = [round(100 * amount / v[capacity], 1)
+                            for amount, v in zip(summary[load], planned_fleet)]
 
     unassigned = assignments["vehicle_id"].eq("NICHT ZUGEWIESEN")
     if unassigned.any():
@@ -614,7 +613,7 @@ def create_clusters(geo_json, vehicle_table, depot_json):
         )
     else:
         msg = (
-            "✅ Straßenbasierte Cluster mit Zeitbudget erstellt. "
+            f"✅ {len(planned_fleet)} Lkw eingeplant ({small_index} × 14 t, {large_index} × 40 t). "
             "Fahrzeit, Service, Pausen und Rückweg wurden eingeplant."
         )
 
@@ -639,6 +638,7 @@ def create_clusters(geo_json, vehicle_table, depot_json):
         "[]" if unassigned.any() else assignments.to_json(orient="records", force_ascii=False),
         msg,
         "[]",
+        planned_fleet if not unassigned.any() else [],
     )
 
 
@@ -742,18 +742,18 @@ def optimize_routes(cluster_json, vehicle_table, depot_json):
     if not routes:
         raise gr.Error("Keine Route konnte optimiert werden.")
 
-    choices = ["Alle Touren"] + [route["vehicle_id"] for route in routes]
+    choices = [route["vehicle_id"] for route in routes]
 
     return (
         pd.DataFrame(route_rows),
-        gr.update(choices=choices, value="Alle Touren", interactive=True),
-        build_map(routes, depot),
+        gr.update(choices=choices, value=choices[0], interactive=True),
+        build_map(routes[:1], depot),
         json.dumps(routes, ensure_ascii=False),
         json.dumps(debug, ensure_ascii=False, indent=2, default=str),
         (
             "✅ Straßenroute und Fahrerbudget geprüft; Cluster-Reihenfolge beibehalten. "
             "Pausen sind Zeitreserven ohne geprüfte Parkplätze. Forecast-Ankünfte enthalten diese Pausen noch nicht. "
-            "Als Nächstes kann der segmentweise TomTom-Forecast berechnet werden."
+
         ),
     )
 
@@ -849,7 +849,7 @@ def calculate_all_forecasts(
     normalized_start = normalize_start_time(start_date, start_time)
 
     forecasts = {}
-    tour_cards = []
+    tour_cards = {}
     deviations = []
     debug = []
     logging_results = []
@@ -936,7 +936,7 @@ def calculate_all_forecasts(
                 )
 
         deviations.append(f"- **{vehicle_id}** · {difference}")
-        tour_cards.append(render_forecast_card(vehicle_id, driver_status, segments, not tour_cards))
+        tour_cards[vehicle_id] = render_forecast_card(vehicle_id, driver_status, segments, expanded=True)
 
         try:
             log_result = log_forecast(forecast)
@@ -967,7 +967,7 @@ def calculate_all_forecasts(
     }
 
     return (
-        "".join(tour_cards),
+        tour_cards,
         "\n".join(deviations),
         json.dumps(combined_debug, ensure_ascii=False, indent=2, default=str),
         f"Forecast für {len(forecasts)} von {len(routes)} Touren berechnet.",
@@ -1136,7 +1136,7 @@ with gr.Blocks(
     with gr.Tabs(elem_id="workflow-tabs"):
 
         with gr.Tab("1 · Aufträge & Adressen"):
-            gr.Markdown("## Aufträge & Adressen\nCSV auswählen und importieren. Nur unklare Adressen brauchen deine Bestätigung.", elem_classes=["step-intro"])
+            gr.Markdown("## Aufträge & Adressen\nCSV auswählen und importieren. Passende Adressen werden automatisch übernommen. Ersatztreffer stehen in den Prüfergebnissen.", elem_classes=["step-intro"])
             upload = gr.File(
                 label="CSV-Datei",
                 file_types=[".csv"],
@@ -1161,30 +1161,8 @@ with gr.Blocks(
                     interactive=False,
                     wrap=True,
                 )
-            with gr.Group(visible=False) as address_review:
-                review_info = gr.Markdown("Noch keine Prüfung gestartet.")
-                review_address = gr.Textbox(
-                    label="Adresse korrigieren oder ergänzen",
-                    placeholder="Straße Hausnummer, PLZ Ort",
-                    interactive=False,
-                )
-                search_review_btn = gr.Button(
-                    "Korrigierte Adresse erneut suchen"
-                )
-                address_choice = gr.Radio(
-                    choices=[],
-                    label="Welche Adresse ist richtig?",
-                    interactive=False
-                )
-                confirm_review_btn = gr.Button(
-                    "Adresse bestätigen",
-                    variant="primary"
-                )
-                confirm_status = gr.Markdown()
-
-
         with gr.Tab("2 · Depot, Flotte & Regionen"):
-            gr.Markdown("## Depot & Flotte\nLege den Startpunkt fest und verteile deine Aufträge auf passende Fahrzeuge.", elem_classes=["step-intro"])
+            gr.Markdown("## Depot & Flotte\nBestätige das Depot. Die App ermittelt aus den Aufträgen die Tourgruppen und die benötigten Lkw.", elem_classes=["step-intro"])
             depot_input = gr.Textbox(
                 label="Depotadresse",
                 placeholder="z. B. Mercedesstraße 1, 70372 Stuttgart"
@@ -1202,29 +1180,13 @@ with gr.Blocks(
             )
             depot_status = gr.Markdown()
 
-            with gr.Row():
-                small_count = gr.Number(
-                    label="14-t-LKW",
-                    value=3,
-                    minimum=0,
-                    precision=0
-                )
-                large_count = gr.Number(
-                    label="40-t-LKW",
-                    value=3,
-                    minimum=0,
-                    precision=0
-                )
-                fleet_btn = gr.Button("Flotte aktualisieren")
-
-            fleet_status = gr.Markdown()
-            vehicle_table = gr.State(make_fleet().to_dict("records"))
-            gr.Markdown("### Verfügbare Fahrzeuge")
+            vehicle_table = gr.State([])
+            gr.Markdown("### Eingeplante Fahrzeuge")
 
             @gr.render(inputs=vehicle_table)
             def render_vehicle_cards(fleet):
                 if not fleet:
-                    gr.Markdown("Keine Fahrzeuge konfiguriert.")
+                    gr.Markdown("Noch keine Touren geplant.")
                 for vehicle in fleet:
                     vehicle_id = vehicle["vehicle_id"]
                     with gr.Group():
@@ -1236,7 +1198,7 @@ with gr.Blocks(
                         )
 
             cluster_btn = gr.Button(
-                "Regionen bilden & LKW zuweisen",
+                "Tourgruppen und Lkw ermitteln",
                 variant="primary"
             )
             cluster_status = gr.Markdown()
@@ -1249,10 +1211,19 @@ with gr.Blocks(
                 wrap=True
             )
 
-        with gr.Tab("3 · Routenoptimierung"):
-            gr.Markdown("## Deine Touren im Überblick\nOptimiere die Stopp-Reihenfolge und erkunde die Routen auf der Karte.", elem_classes=["step-intro"])
+        with gr.Tab("3 · Routen & Forecast"):
+            gr.Markdown("## Deine Touren im Überblick\nBerechne die Straßenrouten und den Forecast. Wähle anschließend einen Lkw aus.", elem_classes=["step-intro"])
+            gr.Markdown(
+                "🟢 **TomTom API konfiguriert**"
+                if TOMTOM_API_KEY
+                else "🔴 **TOMTOM_API_KEY fehlt**"
+            )
+            logger_status_ui = gr.Markdown(logger_status_markdown())
+            with gr.Row():
+                start_date_input = gr.Textbox(label="Tourdatum", value=current_tour_date, placeholder="03.11.26")
+                start_time_input = gr.Textbox(label="Startzeit", placeholder="07:00")
             optimize_btn = gr.Button(
-                "LKW-Routen optimieren",
+                "Routen und Forecast berechnen",
                 variant="primary"
             )
             optimize_status = gr.Markdown()
@@ -1273,32 +1244,18 @@ with gr.Blocks(
                     language="json"
                 )
 
-        with gr.Tab("4 · Dynamischer Forecast"):
-            gr.Markdown("## Vorausschauend unterwegs\nBerechne die erwarteten Fahrzeiten und Ankünfte für deine geplanten Touren.", elem_classes=["step-intro"])
-            gr.Markdown(
-                "🟢 **TomTom API konfiguriert**"
-                if TOMTOM_API_KEY
-                else "🔴 **TOMTOM_API_KEY fehlt**"
-            )
-            logger_status_ui = gr.Markdown(logger_status_markdown())
-            with gr.Row():
-                start_date_input = gr.Textbox(label="Tourdatum", value=current_tour_date, placeholder="03.11.26")
-                start_time_input = gr.Textbox(label="Startzeit", placeholder="07:00")
-            forecast_btn = gr.Button(
-                "Segment-Forecast berechnen",
-                variant="primary"
-            )
             forecast_status = gr.Markdown()
             forecast_cards = gr.HTML()
+            forecast_by_vehicle = gr.State({})
             with gr.Accordion("Technische Details", open=False):
                 traffic_debug = gr.Code(
                     label="Forecast / Logging Debug",
                     language="json"
                 )
 
-        with gr.Tab("5 · IHK: Training & Vergleich"):
+        with gr.Tab("4 · IHK: Training & Vergleich"):
             gr.Markdown("## Abweichung je Lkw")
-            live_deviations = gr.Markdown("Berechne zuerst einen Forecast auf Seite 4. Der Vergleich umfasst die gesamte Tour inklusive Rückfahrt.")
+            live_deviations = gr.Markdown("Berechne zuerst einen Forecast auf Seite 3. Der Vergleich umfasst die gesamte Tour inklusive Rückfahrt.")
             gr.Markdown("## Planbasis gegen ML prüfen\nAuftrags-CSV für den Offline-Test oder vorbereitete Segment-CSV hochladen. Training, Validierung und Test verwenden getrennte Touren.")
             synthetic_seed = gr.Number(label="Zufallsstartwert für Auftrags-CSV", value=42, precision=0, minimum=0)
             synthetic_count = gr.Number(label="Anzahl synthetischer Touren", value=30, precision=0, minimum=5, maximum=500)
@@ -1332,12 +1289,12 @@ with gr.Blocks(
     train_button.click(run_training, [training_csv, synthetic_seed, synthetic_count], [ml_state, training_status, training_metrics, training_details, training_manifest])
 
     def import_orders(file):
-        return (*read_csv(file), "[]", gr.update(visible=False), "Adressen werden geprüft …")
+        return (*read_csv(file), "[]", "Adressen werden geprüft …")
 
     import_event = import_btn.click(
         import_orders,
         upload,
-        [orders_table, order_summary, orders_state, geo_state, address_review, finish_status]
+        [orders_table, order_summary, orders_state, geo_state, finish_status]
     )
 
     geocode_event = import_event.success(
@@ -1346,78 +1303,21 @@ with gr.Blocks(
         [
             address_table,
             address_state,
-            candidates_state,
             address_status_md
-        ],
-    )
-
-    geocode_event.success(
-        prepare_review,
-        [address_state, candidates_state],
-        [
-            selected_order_state,
-            selected_hits_state,
-            review_address,
-            review_info,
-            address_choice
-        ],
-    )
-
-    search_review_btn.click(
-        search_review_address,
-        [
-            address_state,
-            candidates_state,
-            selected_order_state,
-            review_address,
-        ],
-        [
-            address_table,
-            address_state,
-            candidates_state,
-            selected_hits_state,
-            review_info,
-            address_choice,
-            confirm_status,
-        ],
-    )
-
-    confirm_event = confirm_review_btn.click(
-        confirm_review,
-        [
-            address_state,
-            candidates_state,
-            selected_order_state,
-            selected_hits_state,
-            address_choice
-        ],
-        [
-            address_table,
-            address_state,
-            address_status_md,
-            confirm_status,
-            selected_order_state,
-            selected_hits_state,
-            review_address,
-            review_info,
-            address_choice,
         ],
     )
 
     def update_address_readiness(addresses, orders):
         full = _read_json(addresses)
-        pending = not full.empty and full["status"].eq("MANUELL PRÜFEN").any()
-        if full.empty or pending:
-            return "[]", "", gr.update(visible=bool(pending))
-        geocoded, status = save_addresses(addresses, orders)
-        return geocoded, status, gr.update(visible=False)
+        if full.empty or full["status"].eq("NICHT GEFUNDEN").any():
+            return "[]", "Bitte die nicht gefundenen Adressen in der CSV korrigieren und erneut importieren."
+        return save_addresses(addresses, orders)
 
-    for event in (geocode_event, confirm_event):
-        event.success(
-            update_address_readiness,
-            [address_state, orders_state],
-            [geo_state, finish_status, address_review],
-        )
+    geocode_event.success(
+        update_address_readiness,
+        [address_state, orders_state],
+        [geo_state, finish_status],
+    )
 
     depot_search_btn.click(
         search_depot,
@@ -1442,23 +1342,10 @@ with gr.Blocks(
         ],
     )
 
-    fleet_btn.click(
-        update_fleet,
-        [
-            small_count,
-            large_count
-        ],
-        [
-            vehicle_table,
-            fleet_status
-        ],
-    )
-
     cluster_btn.click(
         create_clusters,
         [
             geo_state,
-            vehicle_table,
             depot_state
         ],
         [
@@ -1467,10 +1354,15 @@ with gr.Blocks(
             cluster_state,
             cluster_status,
             routes_state,
+            vehicle_table,
         ],
     )
 
-    optimize_btn.click(
+    clear_results = optimize_btn.click(
+        lambda: ({}, "", "", "", "[]"),
+        outputs=[forecast_by_vehicle, forecast_cards, live_deviations, forecast_status, routes_state],
+    )
+    route_event = clear_results.success(
         optimize_routes,
         [
             cluster_state,
@@ -1504,7 +1396,7 @@ with gr.Blocks(
 
     route_selector.change(show_loading_plan, [routes_state, route_selector], loading_table)
 
-    forecast_btn.click(
+    forecast_event = route_event.success(
         calculate_all_forecasts,
         [
             routes_state,
@@ -1514,8 +1406,15 @@ with gr.Blocks(
             start_time_input,
             ml_state
         ],
-        [forecast_cards, live_deviations, traffic_debug, forecast_status],
+        [forecast_by_vehicle, live_deviations, traffic_debug, forecast_status],
     )
+
+    def show_vehicle_forecast(cards, vehicle_id):
+        return cards.get(vehicle_id, "Für diesen Lkw liegt kein Forecast vor.") if vehicle_id else ""
+
+    forecast_inputs = [forecast_by_vehicle, route_selector]
+    forecast_event.success(show_vehicle_forecast, forecast_inputs, forecast_cards)
+    route_selector.change(show_vehicle_forecast, forecast_inputs, forecast_cards)
 
 
 if __name__ == "__main__":

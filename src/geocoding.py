@@ -89,6 +89,38 @@ class Geocoder:
 
         return self._deduplicate_and_rank(all_hits, address, requested_limit)
 
+    def resolve_delivery(self, street, postcode, city):
+        """Resolve an address or a nearby point on the same street and postcode."""
+        street = str(street).strip()
+        match = re.fullmatch(r"(.+?)\s+(\d+)\s*([a-zA-Z]?)", street)
+        road = match[1] if match else street
+        queries = [(street, match[2] + match[3] if match else None, "OK" if match else "STRASSE")]
+        if match:
+            for distance in range(1, 4):
+                for number in (int(match[2]) + distance, int(match[2]) - distance):
+                    if number > 0:
+                        queries.append((f"{road} {number}", str(number), "NACHBARHAUSNUMMER"))
+            queries.append((road, None, "STRASSE"))
+
+        def normalize(value):
+            return " ".join(str(value or "").casefold().split())
+
+        for query, number, status in queries:
+            for hit in self.search(f"{query}, {postcode} {city}"):
+                raw = hit.get("raw") or {}
+                data = raw.get("properties") or raw.get("address") or {}
+                found_road = (data.get("street") or data.get("road") or
+                              data.get("pedestrian") or data.get("name"))
+                found_number = data.get("housenumber") or data.get("house_number")
+                if normalize(found_road) != normalize(road):
+                    continue
+                if normalize(data.get("postcode")) != normalize(postcode):
+                    continue
+                if number is not None and normalize(found_number).replace(" ", "") != number.casefold():
+                    continue
+                return hit, status
+        return None, "NICHT GEFUNDEN"
+
     @staticmethod
     def _clean_address(address: str) -> str:
         value = str(address or "").strip()
