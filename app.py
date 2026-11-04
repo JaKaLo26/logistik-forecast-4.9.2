@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 import os
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from io import StringIO
@@ -244,13 +245,18 @@ def geocode_all(orders_json):
         f"**Adressprüfung gestartet: 0 / {len(orders)} Adressen.** Die Adressdienste werden abgefragt.",
     )
 
+    next_lookup = 0.0
     for _, row in orders.iterrows():
+        delay = next_lookup - time.monotonic()
+        if delay > 0:
+            time.sleep(delay)
+        next_lookup = time.monotonic() + 1.0
         oid = str(row["auftrag"])
         error = ""
         try:
             hits = _prepare_candidates(
                 oid,
-                geocoder.search(row["adresse"], 5),
+                geocoder.search(row["adresse"], 5, fast=True),
             )
         except (RuntimeError, ValueError, TypeError, KeyError) as exc:
             hits = []
@@ -261,7 +267,7 @@ def geocode_all(orders_json):
 
         if best:
             confidence = float(best.get("confidence", 0))
-            status = "MANUELL PRÜFEN"
+            status = "OK" if confidence >= 0.72 else "MANUELL PRÜFEN"
         else:
             confidence = 0.0
             status = "MANUELL PRÜFEN"
@@ -1160,7 +1166,7 @@ with gr.Blocks(
     with gr.Tabs(elem_id="workflow-tabs"):
 
         with gr.Tab("1 · Aufträge & Adressen"):
-            gr.Markdown("## Aufträge & Adressen\nCSV auswählen und importieren. Wähle für jede Adresse einen Vorschlag und bestätige ihn.", elem_classes=["step-intro"])
+            gr.Markdown("## Aufträge & Adressen\nCSV auswählen und importieren. Sichere Treffer werden automatisch bestätigt. Prüfe unklare Adressen anhand der Vorschläge.", elem_classes=["step-intro"])
             upload = gr.File(
                 label="CSV-Datei",
                 file_types=[".csv"],
