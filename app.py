@@ -261,7 +261,7 @@ def geocode_all(orders_json):
 
         if best:
             confidence = float(best.get("confidence", 0))
-            status = "OK" if confidence >= 0.72 else "MANUELL PRÜFEN"
+            status = "MANUELL PRÜFEN"
         else:
             confidence = 0.0
             status = "MANUELL PRÜFEN"
@@ -318,7 +318,7 @@ def address_status(full):
     open_count = int((full["status"] == "MANUELL PRÜFEN").sum())
     return (
         f"**{len(full)} Adressen geprüft · "
-        f"✅ {len(full) - open_count} automatisch/bestätigt · "
+        f"✅ {len(full) - open_count} bestätigt · "
         f"⚠️ {open_count} offen**"
     )
 
@@ -355,7 +355,7 @@ def prepare_review(address_state_json, candidates_json):
         f"### Jetzt prüfen\n**{row['kunde']}**  \n{row['eingabe']}",
         gr.update(
             choices=choices,
-            value=choices[0][1] if choices else None,
+            value=None,
             interactive=bool(choices),
         ),
     )
@@ -427,7 +427,7 @@ def search_review_address(
         message,
         gr.update(
             choices=choices,
-            value=choices[0][1] if choices else None,
+            value=None,
             interactive=bool(choices),
         ),
         status,
@@ -496,7 +496,7 @@ def confirm_review(address_state_json, candidates_json, oid, hits_json, selected
         info = f"### Jetzt prüfen\n**{next_row['kunde']}**  \n{next_row['eingabe']}"
         choice = gr.update(
             choices=choices,
-            value=choices[0][1] if choices else None,
+            value=None,
             interactive=bool(choices),
         )
 
@@ -520,7 +520,7 @@ def save_addresses(address_state_json, orders_json):
     if full.empty:
         raise gr.Error("Keine Adressprüfung vorhanden.")
 
-    if (full["status"] == "MANUELL PRÜFEN").any():
+    if not full["status"].eq("MANUELL BESTÄTIGT").all():
         raise gr.Error("Es sind noch Adressen offen.")
 
     merged = orders.merge(
@@ -1160,7 +1160,7 @@ with gr.Blocks(
     with gr.Tabs(elem_id="workflow-tabs"):
 
         with gr.Tab("1 · Aufträge & Adressen"):
-            gr.Markdown("## Aufträge & Adressen\nCSV auswählen und importieren. Nur unklare Adressen brauchen deine Bestätigung.", elem_classes=["step-intro"])
+            gr.Markdown("## Aufträge & Adressen\nCSV auswählen und importieren. Wähle für jede Adresse einen Vorschlag und bestätige ihn.", elem_classes=["step-intro"])
             upload = gr.File(
                 label="CSV-Datei",
                 file_types=[".csv"],
