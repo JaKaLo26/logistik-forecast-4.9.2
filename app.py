@@ -267,7 +267,8 @@ def geocode_all(orders_json):
 
         if best:
             confidence = float(best.get("confidence", 0))
-            status = "OK" if confidence >= 0.72 else "MANUELL PRÜFEN"
+            # Jeder Vorschlag benötigt die ausdrückliche Freigabe des Nutzers.
+            status = "MANUELL PRÜFEN"
         else:
             confidence = 0.0
             status = "MANUELL PRÜFEN"
@@ -1166,7 +1167,7 @@ with gr.Blocks(
     with gr.Tabs(elem_id="workflow-tabs"):
 
         with gr.Tab("1 · Aufträge & Adressen"):
-            gr.Markdown("## Aufträge & Adressen\nCSV auswählen und importieren. Sichere Treffer werden automatisch bestätigt. Prüfe unklare Adressen anhand der Vorschläge.", elem_classes=["step-intro"])
+            gr.Markdown("## Aufträge & Adressen\nCSV auswählen und importieren. Wähle nach der Prüfung für jede Adresse einen Vorschlag aus und bestätige ihn. Erst nach Freigabe aller Adressen geht es zur Tourenplanung.", elem_classes=["step-intro"])
             upload = gr.File(
                 label="CSV-Datei",
                 file_types=[".csv"],
