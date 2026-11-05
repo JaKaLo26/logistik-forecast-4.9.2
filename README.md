@@ -5,7 +5,7 @@ colorFrom: blue
 colorTo: green
 sdk: gradio
 sdk_version: 5.49.1
-python_version: "3.11"
+python_version: "3.12"
 app_file: app.py
 pinned: false
 ---
@@ -114,3 +114,13 @@ Die Pipeline teilt ganze Touren zeitlich in Training, Validierung und Test
 bzw. Validierung ausgeschlossen. Das lokal erzeugte Modell wird temporär
 gespeichert und neu geladen, bevor es die Testsegmente prognostiziert.
 Die Tabelle kennzeichnet synthetische Zielzeiten ausdrücklich.
+
+## Build-Kompatibilität · 05.11.2026
+
+Der eingebaute Forecast nutzt scikit-learn 1.8.0. Der Space muss mit Python
+3.12 laufen; Python 3.10 kann diese Version nicht installieren. ZeroGPU listet
+Python 3.12.12 als unterstützte Laufzeit. Die README-Metadaten setzen daher
+`python_version: "3.12"`. Deployment überträgt Laufzeitmetadaten und Modell
+zusammen, bevor der restliche Anwendungscode synchronisiert wird.
+Das Modell wird für diesen Build-Fix nicht verändert oder neu trainiert.
+Referenz: https://huggingface.co/docs/hub/spaces-zerogpu

@@ -34,15 +34,22 @@ jobs:
           fi
           python - <<'PY'
           import os
-          from huggingface_hub import HfApi
+          from pathlib import Path
+          from huggingface_hub import HfApi, CommitOperationAdd
           api = HfApi(token=os.environ["HF_TOKEN"])
-          # Publish only the reviewed bundled artifact; other pickles stay excluded.
-          api.upload_file(
-              path_or_fileobj="models/builtin_forecast.joblib",
-              path_in_repo="models/builtin_forecast.joblib",
+          # Publish runtime metadata and the reviewed model together, avoiding
+          # an intermediate build with the old Python runtime.
+          metadata = Path("README.md").read_text().split("---", 2)[1]
+          if 'python_version: "3.12"' not in metadata.splitlines():
+              raise RuntimeError("Bundled sklearn 1.8 model requires the configured Python 3.12 runtime")
+          api.create_commit(
               repo_id="JaKaLo/LogistikForecastAIWorkflow",
               repo_type="space",
-              commit_message="Update bundled synthetic forecast model",
+              operations=[
+                  CommitOperationAdd(path_in_repo="README.md", path_or_fileobj="README.md"),
+                  CommitOperationAdd(path_in_repo="models/builtin_forecast.joblib", path_or_fileobj="models/builtin_forecast.joblib"),
+              ],
+              commit_message="Set Python 3.12 and bundled forecast model together",
           )
           api.upload_folder(
               folder_path=".",
