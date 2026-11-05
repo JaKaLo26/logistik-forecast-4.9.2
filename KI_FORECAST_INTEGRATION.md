@@ -67,3 +67,30 @@ TomTom bleibt der optionale bestehende Livevergleich; kein neuer TomTom-Dienst.
 Datenstand/Abrufzeit der späteren Betriebsanfragen sind nicht mit dem Datum
 dieser Codeänderung gleichzusetzen. Vollständige laufbezogene Quellenprotokolle
 sind weiterhin eine gesonderte Anforderung; dieser Änderungstest erzeugt keine.
+
+## Fahrerbudgets auf Seite 2 · Adapter 1.3 · 05.11.2026
+
+Ursache: Die vorhandene Pausen-/Budgetprüfung nutzte ausschließlich automatisch
+angelegte Standardfahrer. Nun bearbeitbare Fahrerliste in Minuten, eine Zeile je
+verfügbarem Fahrer. Tages-/Wochen-/Doppelwochenrestlenkzeit, Arbeits-/Dienstrest,
+Lenk-/Arbeitsvorzeit seit Pause und Zeit bis Wochenruhe werden übernommen.
+Kein neuer Fahrer wird bei Budgetmangel erfunden; offene Aufträge bleiben offen.
+Bei Umbenennung/Größenanpassung des LKW bleiben die Fahrerwerte erhalten.
+Änderungen an Fahrerbudgets verwerfen die bisherige Planung.
+Pausensumme, Tourdauer und Pausenereignisse sind auf Seite 2 sichtbar.
+Standardprofil: 9h tägliche Lenkzeit, volle 45-Minuten-Pausen, 11h tägliche
+Ruhe geschützt durch verbleibendes Dienstzeitfenster. Keine Ausnahmeprüfung
+für verlängerte Lenkzeit, geteilte Pausen oder reduzierte Ruhezeiten.
+Vorzeiten und Fristen sind manuelle Vorgaben, kein Tachographenimport.
+Vorhandene Grenze bleibt: Forecast-Ankunftskette auf Seite 3 enthält bislang
+keine vollständige Pausenzeitfortschreibung; der separate Fahrerplan enthält sie.
+
+Quellenprüfung 05.11.2026: Europäische Kommission, Driving time and rest periods:
+https://transport.ec.europa.eu/transport-modes/road/social-provisions/driving-time-and-rest-periods_en
+Rechtsgrundlage VO (EG) 561/2006, Art. 6–8, konsolidierter Stand 31.12.2024:
+https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:02006R0561-20241231
+Kein Anspruch auf vollständige rechtliche Compliance-Prüfung.
+
+Prüfung: 3 neue Fahrertests und 9 vorhandene Planungstests bestanden;
+App-Callbacktest ergänzt um Fahrerzuordnung, erhaltene Vorzeit und 45min Pause.
+Erneute App-Callbackprüfung nach Installation der lokalen Proxy-Abhängigkeit erfolgreich.

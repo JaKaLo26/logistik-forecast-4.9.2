@@ -17,6 +17,7 @@ import gradio as gr
 import pandas as pd
 import spaces
 from uuid import uuid4
+from src.driver_planning import driver_fleet, DRIVER_COLUMNS
 from src.builtin_model import load_builtin_model, predict_road_matrix
 from src.ml_training import predict_seconds
 from dotenv import load_dotenv
@@ -590,7 +591,7 @@ def confirm_depot(input_address, hits_json, selected):
     )
 
 
-def create_clusters(geo_json, depot_json, start_date, start_time, ml_bundle):
+def create_clusters(geo_json, depot_json, start_date, start_time, ml_bundle, driver_rows=None):
     orders = _read_json(geo_json)
     if orders.empty:
         raise gr.Error("Adressprüfung zuerst abschließen.")
@@ -606,7 +607,12 @@ def create_clusters(geo_json, depot_json, start_date, start_time, ml_bundle):
     coords = [depot_coord] + [(float(row.lat), float(row.lon)) for row in orders.itertuples()]
     baseline, distances = road_matrix(coords, include_distances=True)
     predicted = predict_road_matrix(baseline, distances, departure, ml_bundle)
-    vehicles = make_fleet(0, len(orders))
+    vehicles = make_fleet(0, len(orders) if driver_rows is None else len(driver_rows))
+    if driver_rows is not None:
+        try:
+            vehicles = driver_fleet(vehicles, driver_rows)
+        except Exception as exc:
+            raise gr.Error(str(exc))
     assignments, summary, warnings = cluster_orders(
         orders,
         vehicles,
@@ -624,9 +630,14 @@ def create_clusters(geo_json, depot_json, start_date, start_time, ml_bundle):
         else:
             large_index += 1
             vehicle_id, spec = f"LKW-G{large_index:02d}", LARGE
+        source_driver = vehicles[vehicles.vehicle_id == row["vehicle_id"]].iloc[0]
         planned_fleet.append({
             "vehicle_id": vehicle_id, **spec, "available": True,
-            "color": COLORS[len(planned_fleet) % len(COLORS)], **DRIVER_DEFAULTS,
+            "color": COLORS[len(planned_fleet) % len(COLORS)],
+            **{key: source_driver[key] for key in DRIVER_DEFAULTS},
+            "driver_id": source_driver.get("driver_id", "Demofahrer"),
+            "planned_break_min": row["pausen_min"],
+            "planned_tour_min": row["tourdauer_min"],
         })
     if planned_fleet:
         id_map = dict(zip(summary["vehicle_id"], (v["vehicle_id"] for v in planned_fleet)))
@@ -650,7 +661,7 @@ def create_clusters(geo_json, depot_json, start_date, start_time, ml_bundle):
     else:
         msg = (
             f"✅ {len(planned_fleet)} Lkw eingeplant ({small_index} × 14 t, {large_index} × 40 t). "
-            "Fahrzeit, Service, Pausen und Rückweg wurden eingeplant."
+            "Fahrzeit, Service, Pausen und Rückweg wurden mit den eingetragenen Fahrerbudgets eingeplant."
         )
 
     warnings.insert(0, "KI-Fahrzeiten zur gewählten Startzeit; synthetischer Machbarkeitsnachweis. Abfahrtszeitänderungen erfordern neue Tourgruppen.")
@@ -1251,6 +1262,12 @@ with gr.Blocks(
             )
             depot_status = gr.Markdown()
 
+            gr.Markdown("### Verfügbare Fahrer und Zeitbudgets\nAlle Zeiten in Minuten **ab Tourstart**. Pro verfügbarem Fahrer eine Zeile; die App plant höchstens eine Tour je Fahrer. Vorgaben sind Demowerte und müssen anhand der Fahreraufzeichnungen angepasst werden. Standardprofil: 9 Stunden Tageslenkzeit, volle 45-Minuten-Pausen, keine 10-Stunden-Verlängerung. Service zählt als Arbeit, nicht als Pause.")
+            driver_inputs = gr.Dataframe(headers=DRIVER_COLUMNS,
+                value=[["FAHRER-01", *DRIVER_DEFAULTS.values()]],
+                datatype=["str"] + ["number"] * len(DRIVER_DEFAULTS),
+                type="pandas", interactive=True, label="Fahrerbudgets · Zeilen für weitere verfügbare Fahrer ergänzen")
+            gr.Markdown("`remaining_drive_min`: Tagesrestlenkzeit · `drive_since_break_min`: Lenkzeit seit letzter voller Pause · `work_since_break_min`: Arbeit seit letzter Pause · `remaining_work_min`: Restarbeitszeit · `remaining_duty_min`: Zeit bis Beginn täglicher Ruhe · Wochen-/Doppelwochenrestlenkzeit und Zeit bis Wochenruhe ebenfalls eintragen.")
             vehicle_table = gr.State([])
             gr.Markdown("### Eingeplante Fahrzeuge")
 
@@ -1262,10 +1279,12 @@ with gr.Blocks(
                     vehicle_id = vehicle["vehicle_id"]
                     with gr.Group():
                         gr.Markdown(
-                            f"**{vehicle_id} · {vehicle['class']}**  \n"
+                            f"**{vehicle_id} · {vehicle['class']} · {vehicle.get('driver_id', '')}**  \n"
                             f"Palettenkapazität: **{vehicle['pallet_capacity']}** · "
                             f"Maximale Zuladung: **{vehicle['payload_kg']} kg** · "
-                            f"Verbleibende Lenkzeit: **{vehicle['remaining_drive_min']} min**"
+                            f"Verbleibende Lenkzeit: **{vehicle['remaining_drive_min']} min** · "
+                            f"Geplante Pausen: **{vehicle.get('planned_break_min', 0)} min** · "
+                            f"Tourdauer mit Service und Pausen: **{vehicle.get('planned_tour_min', 0)} min**"
                         )
 
             with gr.Row():
@@ -1441,7 +1460,7 @@ with gr.Blocks(
         [
             geo_state,
             depot_state,
-            start_date_input, start_time_input, ml_state
+            start_date_input, start_time_input, ml_state, driver_inputs
         ],
         [
             cluster_assignments,
@@ -1453,8 +1472,8 @@ with gr.Blocks(
         ],
     )
 
-    for departure_input in (start_date_input, start_time_input):
-        departure_input.change(lambda: ("[]", "[]", [], {}, "", "Startzeit geändert: Tourgruppen bitte neu berechnen."),
+    for departure_input in (start_date_input, start_time_input, driver_inputs):
+        departure_input.change(lambda: ("[]", "[]", [], {}, "", "Startzeit oder Fahrerbudgets geändert: Tourgruppen bitte neu berechnen."),
             outputs=[cluster_state, routes_state, vehicle_table, forecast_by_vehicle, forecast_cards, cluster_status])
 
     clear_results = optimize_btn.click(

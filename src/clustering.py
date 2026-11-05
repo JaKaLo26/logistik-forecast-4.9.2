@@ -170,7 +170,9 @@ def cluster_orders(orders, vehicles, depot, durations=None):
         cid = f'REGION-{len(summaries)+1:02d}'
         for position, item in enumerate(sequence, 1):
             assigned.append({**rows[item-1], 'cluster_id': cid, 'vehicle_id': vehicle['vehicle_id'], 'cluster_sequence': position})
-        summaries.append({'cluster_id': cid, 'vehicle_id': vehicle['vehicle_id'], 'stopps': len(sequence),
+        summaries.append({'cluster_id': cid, 'vehicle_id': vehicle['vehicle_id'], 'fahrer': vehicle.get('driver_id', ''), 'stopps': len(sequence),
+                          'pausenplan': str(report['break_events']),
+                          'restlenkzeit_nach_tour_min': round(float(vehicle.get('remaining_drive_min',540))-report['fahrzeit_min'],2),
                           'paletten': used_p, 'gewicht_kg': used_w,
                           'paletten_auslastung_pct': round(100*used_p/float(vehicle['pallet_capacity']), 1),
                           'gewicht_auslastung_pct': round(100*used_w/float(vehicle['payload_kg']), 1) if float(vehicle['payload_kg']) else 0,

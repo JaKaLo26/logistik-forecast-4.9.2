@@ -12,8 +12,12 @@ assert not any('Training & Vergleich' in str(c) for c in app.demo.config['compon
 frame=normalize_orders(pd.DataFrame([dict(auftrag='A',kunde='K',strasse='S 1',plz='00000',ort='Demo',paletten=2,warengewicht_kg=700,service_min=5,lat=48.79,lon=9.18)]))
 depot=json.dumps(dict(lat=48.8,lon=9.2))
 with patch.object(app,'road_matrix',return_value=([[0,10],[10,0]],[[0,5000],[5000,0]])):
-    clustered=app.create_clusters(frame.to_json(orient='records'),depot,'05.11.26','08:00',bundle)
+    driver={"driver_id":"TEST-FAHRER",**app.DRIVER_DEFAULTS,"remaining_drive_min":80,"drive_since_break_min":260}
+    clustered=app.create_clusters(frame.to_json(orient='records'),depot,'05.11.26','08:00',bundle,pd.DataFrame([driver]))
 assert clustered[5]
+assert clustered[5][0]["driver_id"]=="TEST-FAHRER"
+assert clustered[5][0]["remaining_drive_min"]==80
+assert clustered[1].iloc[0].pausen_min==45
 route_data=dict(legs=[dict(duration=600,distance=5000)]*2,distance_m=10000,duration_s=1200,geometry=[(48.8,9.2),(48.79,9.18),(48.8,9.2)])
 with patch.object(app.OSRMRouter,'route',return_value=route_data):
     planned=app.optimize_routes(clustered[2],clustered[5],depot,'05.11.26','08:00',bundle)
