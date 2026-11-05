@@ -267,8 +267,7 @@ def geocode_all(orders_json):
 
         if best:
             confidence = float(best.get("confidence", 0))
-            # Jeder Vorschlag benötigt die ausdrückliche Freigabe des Nutzers.
-            status = "MANUELL PRÜFEN"
+            status = "OK" if confidence >= 0.72 else "MANUELL PRÜFEN"
         else:
             confidence = 0.0
             status = "MANUELL PRÜFEN"
@@ -362,7 +361,7 @@ def prepare_review(address_state_json, candidates_json):
         f"### Jetzt prüfen\n**{row['kunde']}**  \n{row['eingabe']}",
         gr.update(
             choices=choices,
-            value=None,
+            value=choices[0][1] if choices else None,
             interactive=bool(choices),
         ),
     )
@@ -527,7 +526,7 @@ def save_addresses(address_state_json, orders_json):
     if full.empty:
         raise gr.Error("Keine Adressprüfung vorhanden.")
 
-    if not full["status"].eq("MANUELL BESTÄTIGT").all():
+    if not full["status"].isin(["OK", "MANUELL BESTÄTIGT"]).all():
         raise gr.Error("Es sind noch Adressen offen.")
 
     merged = orders.merge(
@@ -1167,7 +1166,7 @@ with gr.Blocks(
     with gr.Tabs(elem_id="workflow-tabs"):
 
         with gr.Tab("1 · Aufträge & Adressen"):
-            gr.Markdown("## Aufträge & Adressen\nCSV auswählen und importieren. Wähle nach der Prüfung für jede Adresse einen Vorschlag aus und bestätige ihn. Erst nach Freigabe aller Adressen geht es zur Tourenplanung.", elem_classes=["step-intro"])
+            gr.Markdown("## Aufträge & Adressen\nCSV auswählen und importieren. CSV importieren, die Adressprüfung starten und unklare Treffer anhand der Vorschläge bestätigen. Gib die geprüften Adressen anschließend mit „Adressprüfung abschließen“ für die Tourenplanung frei.", elem_classes=["step-intro"])
             upload = gr.File(
                 label="CSV-Datei",
                 file_types=[".csv"],
@@ -1175,6 +1174,7 @@ with gr.Blocks(
             )
             import_btn = gr.Button("CSV importieren", variant="primary")
             order_summary = gr.Markdown()
+            geocode_btn = gr.Button("Adressen automatisch prüfen")
             address_status_md = gr.Markdown()
             finish_status = gr.Markdown()
             with gr.Accordion("Aufträge und Prüfergebnisse anzeigen", open=False):
@@ -1192,7 +1192,7 @@ with gr.Blocks(
                     interactive=False,
                     wrap=True,
                 )
-            with gr.Group(visible=False) as address_review:
+            with gr.Group() as address_review:
                 review_info = gr.Markdown("Noch keine Prüfung gestartet.")
                 review_address = gr.Textbox(
                     label="Adresse korrigieren oder ergänzen",
@@ -1212,6 +1212,7 @@ with gr.Blocks(
                     variant="primary"
                 )
                 confirm_status = gr.Markdown()
+            finish_addresses_btn = gr.Button("Adressprüfung abschließen")
 
 
         with gr.Tab("2 · Depot, Flotte & Regionen"):
@@ -1342,23 +1343,31 @@ with gr.Blocks(
     train_button.click(run_training, [training_csv, synthetic_seed, synthetic_count], [ml_state, training_status, training_metrics, training_details, training_manifest])
 
     def import_orders(file):
-        return (*read_csv(file), "[]", gr.update(visible=False), "Adressen werden geprüft …")
+        return (*read_csv(file), "[]", "[]", "{}", "", "[]",
+                gr.update(value="", interactive=False),
+                "Noch keine Prüfung gestartet.",
+                gr.update(choices=[], value=None, interactive=False),
+                pd.DataFrame(), "", "", "CSV importiert. Starte jetzt die Adressprüfung.")
 
-    import_event = import_btn.click(
+    import_btn.click(
         import_orders,
         upload,
-        [orders_table, order_summary, orders_state, geo_state, address_review, finish_status]
+        [orders_table, order_summary, orders_state, geo_state,
+         address_state, candidates_state, selected_order_state, selected_hits_state,
+         review_address, review_info, address_choice, address_table,
+         address_status_md, confirm_status, finish_status],
     )
 
-    geocode_event = import_event.success(
+    def start_address_review():
+        return "[]", "Adressprüfung läuft …"
+
+    geocode_event = geocode_btn.click(
+        start_address_review,
+        outputs=[geo_state, finish_status],
+    ).success(
         geocode_all,
         orders_state,
-        [
-            address_table,
-            address_state,
-            candidates_state,
-            address_status_md
-        ],
+        [address_table, address_state, candidates_state, address_status_md],
     )
 
     geocode_event.success(
@@ -1414,20 +1423,11 @@ with gr.Blocks(
         ],
     )
 
-    def update_address_readiness(addresses, orders):
-        full = _read_json(addresses)
-        pending = not full.empty and full["status"].eq("MANUELL PRÜFEN").any()
-        if full.empty or pending:
-            return "[]", "", gr.update(visible=bool(pending))
-        geocoded, status = save_addresses(addresses, orders)
-        return geocoded, status, gr.update(visible=False)
-
-    for event in (geocode_event, confirm_event):
-        event.success(
-            update_address_readiness,
-            [address_state, orders_state],
-            [geo_state, finish_status, address_review],
-        )
+    finish_addresses_btn.click(
+        save_addresses,
+        [address_state, orders_state],
+        [geo_state, finish_status],
+    )
 
     depot_search_btn.click(
         search_depot,
