@@ -9,7 +9,7 @@ import json
 import math
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from io import StringIO
 
@@ -17,14 +17,14 @@ import gradio as gr
 import pandas as pd
 import spaces
 from uuid import uuid4
-from src.ml_training import train_experiment, load_forecast_model
-from src.synthetic_training import generate_training_data
+from src.builtin_model import load_builtin_model, predict_road_matrix
+from src.ml_training import predict_seconds
 from dotenv import load_dotenv
 
 load_dotenv()
 
 from src.capacity import normalize_orders, summarize_orders
-from src.clustering import cluster_orders, DRIVER_DEFAULTS, plan_day
+from src.clustering import cluster_orders, DRIVER_DEFAULTS, plan_day, road_matrix
 from src.geocoding import Geocoder
 from src.routing import OSRMRouter
 from src.maps import build_map
@@ -590,7 +590,7 @@ def confirm_depot(input_address, hits_json, selected):
     )
 
 
-def create_clusters(geo_json, depot_json):
+def create_clusters(geo_json, depot_json, start_date, start_time, ml_bundle):
     orders = _read_json(geo_json)
     if orders.empty:
         raise gr.Error("Adressprüfung zuerst abschließen.")
@@ -600,11 +600,17 @@ def create_clusters(geo_json, depot_json):
     depot = _json_load(depot_json, {})
     depot_coord = (float(depot["lat"]), float(depot["lon"]))
 
+    if ml_bundle is None:
+        raise gr.Error("Das eingebaute KI-Modell konnte nicht geladen werden.")
+    departure = normalize_start_time(start_date, start_time)
+    coords = [depot_coord] + [(float(row.lat), float(row.lon)) for row in orders.itertuples()]
+    baseline, distances = road_matrix(coords, include_distances=True)
+    predicted = predict_road_matrix(baseline, distances, departure, ml_bundle)
     vehicles = make_fleet(0, len(orders))
     assignments, summary, warnings = cluster_orders(
         orders,
         vehicles,
-        depot_coord
+        depot_coord, durations=predicted
     )
 
     planned_fleet = []
@@ -647,6 +653,7 @@ def create_clusters(geo_json, depot_json):
             "Fahrzeit, Service, Pausen und Rückweg wurden eingeplant."
         )
 
+    warnings.insert(0, "KI-Fahrzeiten zur gewählten Startzeit; synthetischer Machbarkeitsnachweis. Abfahrtszeitänderungen erfordern neue Tourgruppen.")
     if warnings:
         msg += "\n\n⚠️ " + " | ".join(warnings)
 
@@ -672,7 +679,7 @@ def create_clusters(geo_json, depot_json):
     )
 
 
-def optimize_routes(cluster_json, vehicle_table, depot_json):
+def optimize_routes(cluster_json, vehicle_table, depot_json, start_date, start_time, ml_bundle):
     clustered = _read_json(cluster_json)
     vehicles = pd.DataFrame(vehicle_table)
 
@@ -706,13 +713,20 @@ def optimize_routes(cluster_json, vehicle_table, depot_json):
             stops = sorted(stops, key=lambda stop: stop.get("cluster_sequence", 0))
             result = router.route([depot_coord] + [(float(s["lat"]), float(s["lon"])) for s in stops] + [depot_coord])
             result["ordered_stops"] = stops
-            result["optimizer"] = "street-time-feasible-insertion"
+            result["optimizer"] = "ai-time-feasible-insertion"
             if len(result.get("legs", [])) != len(stops) + 1:
                 raise ValueError("Unvollständige Fahrzeitdaten für Zeitprüfung.")
-            driver_plan = plan_day([leg["duration"] / 60 for leg in result["legs"]],
+            departure = datetime.fromisoformat(normalize_start_time(start_date, start_time))
+            model_legs = []
+            for index, leg in enumerate(result["legs"]):
+                seconds = predict_seconds(ml_bundle, leg['duration'], leg['distance'], departure.isoformat())
+                model_legs.append(seconds / 60)
+                service = float(stops[index].get('service_min', 0)) * 60 if index < len(stops) else 0
+                departure += timedelta(seconds=seconds + service)
+            driver_plan = plan_day(model_legs,
                                    [float(s.get("service_min", 0)) for s in stops], vehicle_row)
             if not driver_plan["feasible"]:
-                raise ValueError("Aktuelle Straßenroute überschreitet Fahrerbudget. Regionen erneut bilden.")
+                raise ValueError("KI-Prognose der Straßenroute überschreitet das Fahrerbudget. Tourgruppen erneut bilden.")
         except Exception as exc:
             debug.append({"vehicle_id": vid, "error": str(exc)})
             continue
@@ -750,6 +764,7 @@ def optimize_routes(cluster_json, vehicle_table, depot_json):
                     "lon": float(stop["lon"]),
                     "paletten": int(stop.get("paletten", 0)),
                     "gesamtgewicht_kg": int(stop.get("gesamtgewicht_kg", 0)),
+                    "warengewicht_kg": float(stop.get("warengewicht_kg", 0)),
                     "service_min": float(stop.get("service_min", 0)),
                 }
                 for stop in ordered
@@ -953,7 +968,8 @@ def calculate_all_forecasts(
             if budget is None:
                 driver_status = "Fahrerbudget ungültig."
             elif not live_available:
-                driver_status = "⛔ Live-Prüfung fehlgeschlagen. " + ("; ".join(missing_live) or "Keine Abschnitte vorhanden.")
+                ai_drive = sum(segment["model_forecast_s"] for segment in segments) / 60
+                driver_status = f"KI-Fahrzeit: {ai_drive:.0f} von {budget:.0f} min Fahrerbudget. TomTom-Livevergleich nicht verfügbar."
             elif driving > budget:
                 driver_status = (
                     f"⛔ Lenkzeitbudget um {math.ceil(driving - budget)} min überschritten. "
@@ -1148,10 +1164,11 @@ with gr.Blocks(
         <h1>Touren planen.<br>Ankünfte besser einschätzen.</h1>
         <p>Von der ersten Adresse bis zum datenbasierten Vergleich.
         Plane deine Flotte, aktualisiere Prognosen und prüfe die Ergebnisse.</p>
-        <div class="hero-pills"><span>01 — Planung</span><span>02 — Forecast &amp; Reforecast</span><span>03 — Training &amp; Vergleich</span></div>
+        <div class="hero-pills"><span>01 — Planung</span><span>02 — Forecast &amp; Reforecast</span><span>03 — KI-Forecast</span></div>
     """, elem_id="app-hero")
 
-    ml_state = gr.State(None)
+    ml_state = gr.State(load_builtin_model())
+    gr.Markdown("**KI-Modell eingebaut und aktiv.** Vortrainiert auf synthetischen Daten für den technischen Machbarkeitsnachweis.")
     orders_state = gr.State("[]")
     address_state = gr.State("[]")
     candidates_state = gr.State("{}")
@@ -1251,8 +1268,11 @@ with gr.Blocks(
                             f"Verbleibende Lenkzeit: **{vehicle['remaining_drive_min']} min**"
                         )
 
+            with gr.Row():
+                start_date_input = gr.Textbox(label="Tourdatum", value=current_tour_date, placeholder="03.11.26")
+                start_time_input = gr.Textbox(label="Startzeit", value="07:00", placeholder="07:00")
             cluster_btn = gr.Button(
-                "Tourgruppen und Lkw ermitteln",
+                "Mit KI-Fahrzeiten Tourgruppen und Lkw ermitteln",
                 variant="primary"
             )
             cluster_status = gr.Markdown()
@@ -1270,12 +1290,9 @@ with gr.Blocks(
             gr.Markdown(
                 "🟢 **TomTom API konfiguriert**"
                 if TOMTOM_API_KEY
-                else "🔴 **TOMTOM_API_KEY fehlt**"
+                else "KI-Forecast aktiv · TomTom-Livevergleich nicht konfiguriert"
             )
             logger_status_ui = gr.Markdown(logger_status_markdown())
-            with gr.Row():
-                start_date_input = gr.Textbox(label="Tourdatum", value=current_tour_date, placeholder="03.11.26")
-                start_time_input = gr.Textbox(label="Startzeit", placeholder="07:00")
             optimize_btn = gr.Button(
                 "Routen und Forecast berechnen",
                 variant="primary"
@@ -1307,62 +1324,7 @@ with gr.Blocks(
                     language="json"
                 )
 
-        with gr.Tab("4 · IHK: Training & Vergleich"):
-            gr.Markdown("## Abweichung je Lkw")
-            live_deviations = gr.Markdown("Berechne zuerst einen Forecast auf Seite 3. Der Vergleich umfasst die gesamte Tour inklusive Rückfahrt.")
-            gr.Markdown("## Planbasis gegen ML prüfen\nAuftrags-CSV für den Offline-Test oder vorbereitete Segment-CSV hochladen. Training, Validierung und Test verwenden getrennte Touren.")
-            synthetic_seed = gr.Number(label="Zufallsstartwert für Auftrags-CSV", value=42, precision=0, minimum=0)
-            synthetic_count = gr.Number(label="Anzahl synthetischer Touren", value=30, precision=0, minimum=5, maximum=500)
-            training_csv = gr.File(label="Trainingsdaten (CSV; Schema siehe README)", file_types=[".csv"], type="filepath")
-            train_button = gr.Button("Trainieren, vergleichen und für diese Sitzung laden", variant="primary")
-            training_status = gr.Markdown("Noch kein KI-Modell aktiv. Bitte zuerst trainieren oder ein eigenes Modell laden.")
-            model_upload = gr.File(label="Eigenes trainiertes Modell (.joblib; nur vertrauenswürdige Dateien)", file_types=[".joblib"], type="filepath")
-            load_model_button = gr.Button("KI-Modell für Forecast laden")
-            model_download = gr.File(label="Trainiertes Modell herunterladen")
-            training_metrics = gr.Dataframe(label="Fehler auf zurückgehaltenen Touren", interactive=False)
-            training_details = gr.Dataframe(label="Plan, ML und Referenz je Testsegment", interactive=False)
-            training_manifest = gr.Code(label="Modell- und Split-Nachweis", language="json")
-
-    def run_training(file, seed, tour_count):
-        if not file:
-            raise gr.Error("Bitte Trainings-CSV hochladen.")
-        try:
-            frame = pd.read_csv(file, sep=None, engine="python", dtype={"plz": str})
-            generator = None
-            if "auftrag" in frame.columns and "prediction_created_at" not in frame.columns:
-                frame, generator = generate_training_data(frame, seed=int(seed), tour_count=int(tour_count))
-            bundle, metrics, details = train_experiment(frame)
-            if generator:
-                bundle["report"]["generator"] = generator
-        except Exception as exc:
-            raise gr.Error(f"Training abgewiesen: {exc}")
-        report = bundle["report"]
-        gain = metrics.iloc[0].MAE_min - metrics.iloc[1].MAE_min
-        status = f"Modell aktiv für neue Forecasts dieser Sitzung. Herkunft: **{report['data_origin']}**. MAE-Differenz Plan minus ML: **{gain:.2f} min**. Positive Werte sprechen in diesem Test für ML; keine allgemeine Gütegarantie."
-        if report['data_origin'] != 'real':
-            status += " **Nur synthetischer/simulierter Funktionsnachweis.**"
-        import tempfile
-        import joblib
-        from pathlib import Path
-        model_path = Path(tempfile.mkdtemp(prefix="forecast-model-")) / "model.joblib"
-        joblib.dump(bundle, model_path)
-        bundle = load_forecast_model(model_path)
-        report = bundle["report"]
-        return bundle, status, metrics, details, json.dumps(report, ensure_ascii=False, indent=2), str(model_path), {}, "", "Bitte mit dem neuen Modell neu berechnen."
-
-    train_button.click(run_training, [training_csv, synthetic_seed, synthetic_count], [ml_state, training_status, training_metrics, training_details, training_manifest, model_download, forecast_by_vehicle, forecast_cards, forecast_status])
-
-    def activate_model(path):
-        if not path:
-            raise gr.Error("Bitte ein eigenes trainiertes Modell auswählen.")
-        try:
-            bundle = load_forecast_model(path)
-        except Exception as exc:
-            raise gr.Error(f"Modell abgewiesen: {exc}")
-        origin = bundle["report"]["data_origin"]
-        return bundle, f"KI-Modell aktiv für neue Forecasts. Datenherkunft: **{origin}**. Synthetische Modelle dienen dem technischen Funktionsnachweis.", {}, "", "Bitte mit dem geladenen Modell neu berechnen."
-
-    load_model_button.click(activate_model, model_upload, [ml_state, training_status, forecast_by_vehicle, forecast_cards, forecast_status])
+            live_deviations = gr.Markdown()
 
     def import_orders(file):
         return (*read_csv(file), "[]", "[]", "{}", "", "[]",
@@ -1478,7 +1440,8 @@ with gr.Blocks(
         create_clusters,
         [
             geo_state,
-            depot_state
+            depot_state,
+            start_date_input, start_time_input, ml_state
         ],
         [
             cluster_assignments,
@@ -1490,6 +1453,10 @@ with gr.Blocks(
         ],
     )
 
+    for departure_input in (start_date_input, start_time_input):
+        departure_input.change(lambda: ("[]", "[]", [], {}, "", "Startzeit geändert: Tourgruppen bitte neu berechnen."),
+            outputs=[cluster_state, routes_state, vehicle_table, forecast_by_vehicle, forecast_cards, cluster_status])
+
     clear_results = optimize_btn.click(
         lambda: ({}, "", "", "", "[]"),
         outputs=[forecast_by_vehicle, forecast_cards, live_deviations, forecast_status, routes_state],
@@ -1499,7 +1466,8 @@ with gr.Blocks(
         [
             cluster_state,
             vehicle_table,
-            depot_state
+            depot_state,
+            start_date_input, start_time_input, ml_state
         ],
         [
             optimized_stops,

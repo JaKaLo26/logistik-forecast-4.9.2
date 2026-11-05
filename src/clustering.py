@@ -63,13 +63,14 @@ def plan_day(legs_min, service_min, vehicle):
             'tourdauer_min': round(elapsed, 2), 'break_events': events}
 
 
-def road_matrix(coordinates):
+def road_matrix(coordinates, *, include_distances=False):
     """Directed OSRM durations in batches, without a straight-line fallback."""
     from src.routing import OSRMRouter
     router = OSRMRouter(os.getenv('OSRM_BASE_URL', 'https://router.project-osrm.org'),
                         int(os.getenv('REQUEST_TIMEOUT_SECONDS', '20')))
     count = len(coordinates)
     matrix = [[math.inf] * count for _ in coordinates]
+    distances = [[math.inf] * count for _ in coordinates]
     for a in range(0, count, 40):
         sources = list(range(a, min(a+40, count)))
         for b in range(0, count, 40):
@@ -78,25 +79,33 @@ def road_matrix(coordinates):
             if len(indices) == 1:
                 # A one-point block only contains the zero-duration diagonal.
                 matrix[indices[0]][indices[0]] = 0.0
+                distances[indices[0]][indices[0]] = 0.0
                 continue
             local = {original: i for i, original in enumerate(indices)}
             url = router.base_url + '/table/v1/driving/' + router._coord_string([coordinates[i] for i in indices])
             response = router.session.get(url, params={
                 'sources': ';'.join(str(local[i]) for i in sources),
                 'destinations': ';'.join(str(local[i]) for i in destinations),
-                'annotations': 'duration'}, timeout=router.timeout)
+                'annotations': 'duration,distance' if include_distances else 'duration'}, timeout=router.timeout)
             response.raise_for_status()
             payload = response.json()
             if payload.get('code') != 'Ok':
                 raise ValueError('Straßenmatrix nicht verfügbar; keine Luftlinien-Ersatzwerte.')
             values = payload['durations']
+            if include_distances:
+                meters = payload.get('distances', [])
+                if len(meters) != len(sources) or any(len(row) != len(destinations) for row in meters):
+                    raise ValueError('Unvollständige Distanzmatrix.')
             if len(values) != len(sources) or any(len(row) != len(destinations) for row in values):
                 raise ValueError('Unvollständige Straßenmatrix.')
             for i, source in enumerate(sources):
                 for j, target in enumerate(destinations):
                     value = values[i][j]
                     matrix[source][target] = math.inf if value is None else number(value, 'Straßenfahrzeit') / 60
-    return matrix
+                    if include_distances:
+                        value = meters[i][j]
+                        distances[source][target] = math.inf if value is None else number(value, 'Straßendistanz')
+    return (matrix, distances) if include_distances else matrix
 
 
 def cluster_orders(orders, vehicles, depot, durations=None):
@@ -171,3 +180,4 @@ def cluster_orders(orders, vehicles, depot, durations=None):
     if open_ids:
         warnings.append(f'{len(open_ids)} Aufträge offen: keine zulässige Einfügung bei Straßen-, Kapazitäts- und Zeitprüfung gefunden. Kein Nachweis globaler Unlösbarkeit.')
     return pd.DataFrame(assigned, columns=empty.columns), pd.DataFrame(summaries), warnings
+
