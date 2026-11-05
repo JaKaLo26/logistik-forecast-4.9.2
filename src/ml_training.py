@@ -112,6 +112,52 @@ def train_experiment(df):
     details['ML_min'] = prediction/60
     return bundle, pd.DataFrame(scores), details
 
-def predict_seconds(bundle, baseline, distance, departure):
+PIPELINE_FEATURES = ['baseline_s', 'distance_m', 'departure_hour', 'weekday', 'remaining_load_kg']
+
+def load_forecast_model(path):
+    """Load a trusted pipeline artifact; never load untrusted joblib files."""
+    import joblib
+    from pathlib import Path
+    raw = Path(path).read_bytes()
+    bundle = joblib.load(path)
+    if isinstance(bundle, dict) and 'schema_version' not in bundle:
+        report = bundle.get('report', {})
+        if report.get('features') != FEATURES or list(getattr(bundle.get('model'), 'feature_names_in_', [])) != FEATURES:
+            raise ValueError('Incompatible application model features')
+        if report.get('data_origin') not in ('synthetic', 'simulation', 'real'):
+            raise ValueError('Missing model data origin')
+        report['model_id'] = 'app-' + hashlib.sha256(raw).hexdigest()
+        return bundle
+    if not isinstance(bundle, dict) or bundle.get('schema_version') != '1.0.0':
+        raise ValueError('Unsupported pipeline model schema')
+    if bundle.get('features') != PIPELINE_FEATURES or bundle.get('data_origin') != 'synthetic':
+        raise ValueError('Incompatible pipeline feature/origin contract')
+    model = bundle.get('model')
+    if list(getattr(model, 'feature_names_in_', [])) != PIPELINE_FEATURES:
+        raise ValueError('Fitted model features differ from declared schema')
+    bundle['report'] = {'model_id': 'pipeline-' + hashlib.sha256(raw).hexdigest(),
+                        'features': PIPELINE_FEATURES, 'data_origin': 'synthetic'}
+    return bundle
+
+def predict_seconds(bundle, baseline, distance, departure, remaining_load_kg=None):
+    if bundle.get('schema_version') is not None:
+        if bundle.get('schema_version') != '1.0.0' or bundle.get('features') != PIPELINE_FEATURES:
+            raise ValueError('Incompatible pipeline model schema')
+        values = features(baseline, distance, departure)
+        local = pd.Timestamp(departure).tz_convert('Europe/Berlin')
+        values[2] = local.hour + local.minute/60 + local.second/3600 + local.microsecond/3600000000
+        if remaining_load_kg is None or not math.isfinite(float(remaining_load_kg)) or float(remaining_load_kg) < 0:
+            raise ValueError('Pipeline forecast requires nonnegative remaining load')
+        row = pd.DataFrame([values + [float(remaining_load_kg)]], columns=PIPELINE_FEATURES)
+        result = float(bundle['model'].predict(row)[0])
+        if not math.isfinite(result) or result <= 0:
+            raise ValueError('Model produced invalid travel time')
+        return max(1, int(round(result)))
+
     row = pd.DataFrame([features(baseline, distance, departure)], columns=FEATURES)
-    return max(1, int(round(bundle['model'].predict(row)[0])))
+    result = float(bundle['model'].predict(row)[0])
+    if not math.isfinite(result) or result <= 0:
+        raise ValueError('Model produced invalid travel time')
+    return max(1, int(round(result)))
+
+

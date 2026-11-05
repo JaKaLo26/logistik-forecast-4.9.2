@@ -17,7 +17,7 @@ import gradio as gr
 import pandas as pd
 import spaces
 from uuid import uuid4
-from src.ml_training import train_experiment
+from src.ml_training import train_experiment, load_forecast_model
 from src.synthetic_training import generate_training_data
 from dotenv import load_dotenv
 
@@ -831,7 +831,7 @@ def render_forecast_card(vehicle_id, driver_status, segments, expanded=False):
         ("OSRM", "osrm_baseline_s"),
         ("TTLive= Ist-Zeit", "tomtom_live_s"),
         ("TomTom historisch", "tomtom_historic_s"),
-        ("Eigener Forecast", "model_forecast_s"),
+        ("KI-Forecast", "model_forecast_s"),
     )
     opening = " open" if expanded else ""
     parts = [
@@ -873,8 +873,8 @@ def calculate_all_forecasts(
         raise gr.Error("Zuerst Routen optimieren.")
     if not depot:
         raise gr.Error("Depot fehlt.")
-    if not TOMTOM_API_KEY:
-        raise gr.Error("TOMTOM_API_KEY fehlt im Hugging-Face-Space.")
+    if ml_bundle is None:
+        raise gr.Error("Bitte zuerst ein KI-Modell trainieren oder laden.")
 
     normalized_start = normalize_start_time(start_date, start_time)
 
@@ -988,7 +988,7 @@ def calculate_all_forecasts(
         })
 
     if not forecasts:
-        raise gr.Error("Kein Forecast konnte berechnet werden.")
+        raise gr.Error("KI-Forecast fehlgeschlagen: " + "; ".join(str(item.get("error", "Unbekannter Fehler")) for item in debug))
 
     combined_debug = {
         "forecast": debug,
@@ -1315,7 +1315,10 @@ with gr.Blocks(
             synthetic_count = gr.Number(label="Anzahl synthetischer Touren", value=30, precision=0, minimum=5, maximum=500)
             training_csv = gr.File(label="Trainingsdaten (CSV; Schema siehe README)", file_types=[".csv"], type="filepath")
             train_button = gr.Button("Trainieren, vergleichen und für diese Sitzung laden", variant="primary")
-            training_status = gr.Markdown("Noch kein trainiertes Modell aktiv; Forecast nutzt die bestehende Heuristik.")
+            training_status = gr.Markdown("Noch kein KI-Modell aktiv. Bitte zuerst trainieren oder ein eigenes Modell laden.")
+            model_upload = gr.File(label="Eigenes trainiertes Modell (.joblib; nur vertrauenswürdige Dateien)", file_types=[".joblib"], type="filepath")
+            load_model_button = gr.Button("KI-Modell für Forecast laden")
+            model_download = gr.File(label="Trainiertes Modell herunterladen")
             training_metrics = gr.Dataframe(label="Fehler auf zurückgehaltenen Touren", interactive=False)
             training_details = gr.Dataframe(label="Plan, ML und Referenz je Testsegment", interactive=False)
             training_manifest = gr.Code(label="Modell- und Split-Nachweis", language="json")
@@ -1338,9 +1341,28 @@ with gr.Blocks(
         status = f"Modell aktiv für neue Forecasts dieser Sitzung. Herkunft: **{report['data_origin']}**. MAE-Differenz Plan minus ML: **{gain:.2f} min**. Positive Werte sprechen in diesem Test für ML; keine allgemeine Gütegarantie."
         if report['data_origin'] != 'real':
             status += " **Nur synthetischer/simulierter Funktionsnachweis.**"
-        return bundle, status, metrics, details, json.dumps(report, ensure_ascii=False, indent=2)
+        import tempfile
+        import joblib
+        from pathlib import Path
+        model_path = Path(tempfile.mkdtemp(prefix="forecast-model-")) / "model.joblib"
+        joblib.dump(bundle, model_path)
+        bundle = load_forecast_model(model_path)
+        report = bundle["report"]
+        return bundle, status, metrics, details, json.dumps(report, ensure_ascii=False, indent=2), str(model_path), {}, "", "Bitte mit dem neuen Modell neu berechnen."
 
-    train_button.click(run_training, [training_csv, synthetic_seed, synthetic_count], [ml_state, training_status, training_metrics, training_details, training_manifest])
+    train_button.click(run_training, [training_csv, synthetic_seed, synthetic_count], [ml_state, training_status, training_metrics, training_details, training_manifest, model_download, forecast_by_vehicle, forecast_cards, forecast_status])
+
+    def activate_model(path):
+        if not path:
+            raise gr.Error("Bitte ein eigenes trainiertes Modell auswählen.")
+        try:
+            bundle = load_forecast_model(path)
+        except Exception as exc:
+            raise gr.Error(f"Modell abgewiesen: {exc}")
+        origin = bundle["report"]["data_origin"]
+        return bundle, f"KI-Modell aktiv für neue Forecasts. Datenherkunft: **{origin}**. Synthetische Modelle dienen dem technischen Funktionsnachweis.", {}, "", "Bitte mit dem geladenen Modell neu berechnen."
+
+    load_model_button.click(activate_model, model_upload, [ml_state, training_status, forecast_by_vehicle, forecast_cards, forecast_status])
 
     def import_orders(file):
         return (*read_csv(file), "[]", "[]", "{}", "", "[]",
@@ -1534,5 +1556,6 @@ if __name__ == "__main__":
         server_port=int(os.getenv("PORT", "7860")),
         show_error=True,
     )
+
 
 

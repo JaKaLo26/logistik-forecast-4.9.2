@@ -10,3 +10,6 @@ spaces
 scikit-learn>=1.5,<2
 
 tzdata
+
+
+joblib>=1.3,<2
