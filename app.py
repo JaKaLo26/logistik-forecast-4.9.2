@@ -607,7 +607,15 @@ def create_clusters(geo_json, depot_json, start_date, start_time, ml_bundle, dri
     coords = [depot_coord] + [(float(row.lat), float(row.lon)) for row in orders.itertuples()]
     baseline, distances = road_matrix(coords, include_distances=True)
     predicted = predict_road_matrix(baseline, distances, departure, ml_bundle)
-    vehicles = make_fleet(0, len(orders) if driver_rows is None else len(driver_rows))
+    vehicles = make_fleet(0, len(orders))
+    if driver_rows is not None:
+        profile = pd.DataFrame(driver_rows, columns=DRIVER_COLUMNS)
+        if len(profile) != 1:
+            raise gr.Error("Bitte genau ein gemeinsames Fahrerzeitprofil angeben.")
+        driver_rows = pd.DataFrame([
+            {**profile.iloc[0].to_dict(), "driver_id": f"FAHRER-{i + 1:02d}"}
+            for i in range(len(orders))
+        ], columns=DRIVER_COLUMNS)
     if driver_rows is not None:
         try:
             vehicles = driver_fleet(vehicles, driver_rows)
@@ -660,7 +668,7 @@ def create_clusters(geo_json, depot_json, start_date, start_time, ml_bundle, dri
         )
     else:
         msg = (
-            f"✅ {len(planned_fleet)} Lkw eingeplant ({small_index} × 14 t, {large_index} × 40 t). "
+            f"✅ Benötigt: {len(planned_fleet)} Fahrer und {len(planned_fleet)} Lkw eingeplant ({small_index} × 14 t, {large_index} × 40 t). "
             "Fahrzeit, Service, Pausen und Rückweg wurden mit den eingetragenen Fahrerbudgets eingeplant."
         )
 
@@ -1262,11 +1270,11 @@ with gr.Blocks(
             )
             depot_status = gr.Markdown()
 
-            gr.Markdown("### Verfügbare Fahrer und Zeitbudgets\nAlle Zeiten in Minuten **ab Tourstart**. Pro verfügbarem Fahrer eine Zeile; die App plant höchstens eine Tour je Fahrer. Vorgaben sind Demowerte und müssen anhand der Fahreraufzeichnungen angepasst werden. Standardprofil: 9 Stunden Tageslenkzeit, volle 45-Minuten-Pausen, keine 10-Stunden-Verlängerung. Service zählt als Arbeit, nicht als Pause.")
+            gr.Markdown("### Automatische Fahrerplanung und Zeitbudget\nAlle Zeiten in Minuten **ab Tourstart**. Die benötigte Fahreranzahl wird automatisch aus den Touren ermittelt, mit einem Fahrer je Tour. Das gemeinsame Zeitprofil gilt für alle geplanten Fahrer; der berechnete Bedarf muss tatsächlich verfügbar sein. Vorgaben sind Demowerte und müssen anhand der Fahreraufzeichnungen angepasst werden. Standardprofil: 9 Stunden Tageslenkzeit, volle 45-Minuten-Pausen, keine 10-Stunden-Verlängerung. Service zählt als Arbeit, nicht als Pause.")
             driver_inputs = gr.Dataframe(headers=DRIVER_COLUMNS,
                 value=[["FAHRER-01", *DRIVER_DEFAULTS.values()]],
                 datatype=["str"] + ["number"] * len(DRIVER_DEFAULTS),
-                type="pandas", interactive=True, label="Fahrerbudgets · Zeilen für weitere verfügbare Fahrer ergänzen")
+                type="pandas", row_count=(1, "fixed"), interactive=True, label="Gemeinsames Zeitbudget für die automatische Fahrerplanung")
             gr.Markdown("`remaining_drive_min`: Tagesrestlenkzeit · `drive_since_break_min`: Lenkzeit seit letzter voller Pause · `work_since_break_min`: Arbeit seit letzter Pause · `remaining_work_min`: Restarbeitszeit · `remaining_duty_min`: Zeit bis Beginn täglicher Ruhe · Wochen-/Doppelwochenrestlenkzeit und Zeit bis Wochenruhe ebenfalls eintragen.")
             vehicle_table = gr.State([])
             gr.Markdown("### Eingeplante Fahrzeuge")
@@ -1471,6 +1479,20 @@ with gr.Blocks(
             vehicle_table,
         ],
     )
+
+    def auto_plan_drivers(geo_json, depot_json, start_date, start_time, bundle, profile):
+        if not geo_json or geo_json == "[]" or not depot_json:
+            return (pd.DataFrame(), pd.DataFrame(), "[]",
+                    "Fahrerbedarf wird nach bestätigten Adressen und Depot automatisch berechnet.",
+                    "[]", [])
+        return create_clusters(geo_json, depot_json, start_date, start_time, bundle, profile)
+
+    for planning_input in (geo_state, depot_state):
+        planning_input.change(
+            auto_plan_drivers,
+            [geo_state, depot_state, start_date_input, start_time_input, ml_state, driver_inputs],
+            [cluster_assignments, cluster_summary, cluster_state, cluster_status, routes_state, vehicle_table],
+        )
 
     for departure_input in (start_date_input, start_time_input, driver_inputs):
         departure_input.change(lambda: ("[]", "[]", [], {}, "", "Startzeit oder Fahrerbudgets geändert: Tourgruppen bitte neu berechnen."),
