@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from src.tomtom_routing import TomTomRoutingProvider
+from src.ml_predict import predict_if_configured
 
 
 # ============================================================
@@ -64,6 +65,8 @@ class SegmentForecast:
 
     tomtom_success: bool
     tomtom_error: Optional[str]
+    forecast_source: str = "legacy"
+    forecast_warning: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -421,256 +424,80 @@ def _effective_service_s(
 # EIGENER FORECAST
 # ============================================================
 
-def calculate_model_forecast_s(
-    osrm_baseline_s: int,
-    tomtom_historic_s: int,
-    tomtom_live_s: int,
-    traffic_delay_s: int = 0,
-    confidence: float = 1.0,
-) -> int:
-    """
-    Übergangslogik bis zum trainierten ML-Modell.
+def calculate_model_forecast_details(osrm_baseline_s, tomtom_historic_s,
+                                     tomtom_live_s, traffic_delay_s=0, confidence=1.0):
+    """Canonical seconds-only inputs and a traceable prediction decision."""
+    import math
 
-    Gewichtung:
+    def seconds(value):
+        try:
+            number = float(value)
+            return max(0, int(round(number))) if math.isfinite(number) else 0
+        except (TypeError, ValueError):
+            return 0
 
-    TomTom Live
-        stärkster Faktor
+    osrm, historic, live, delay = map(seconds, [osrm_baseline_s, tomtom_historic_s,
+                                               tomtom_live_s, traffic_delay_s])
+    confidence = _clamp(_safe_float(confidence, 0), 0, 1)
+    references = [v for v in (osrm, historic, live) if v > 0]
+    if not references:
+        raise ValueError("Keine gültige Fahrzeit für dieses Segment vorhanden.")
+    prediction = predict_if_configured(osrm, historic, live, delay, confidence)
+    warning = None
+    if prediction is not None:
+        # Broad engineering guard, not a confidence interval or a calibrated accuracy claim.
+        if 0.5 * min(references) <= prediction <= 2 * max(references):
+            return {"seconds": prediction, "source": "configured_model", "warning": None}
+        warning = "Modellwert außerhalb der Plausibilitätsgrenzen; Referenzberechnung verwendet."
 
-    TomTom Historisch
-        stabilisierender Faktor
-
-    OSRM
-        Baseline/Fallback
-    """
-
-    osrm_baseline_s = max(
-        0,
-        _safe_int(
-            osrm_baseline_s
-        )
-    )
-
-    historic_s = max(
-        0,
-        _safe_int(
-            tomtom_historic_s
-        )
-    )
-
-    live_s = max(
-        0,
-        _safe_int(
-            tomtom_live_s
-        )
-    )
-
-    traffic_delay_s = max(
-        0,
-        _safe_int(
-            traffic_delay_s
-        )
-    )
-
-    confidence = _clamp(
-        _safe_float(
-            confidence,
-            1.0
-        ),
-        0.0,
-        1.0,
-    )
-
-    # --------------------------------------------------------
-    # FALLBACKS
-    # --------------------------------------------------------
-
-    if live_s <= 0:
-
-        if historic_s > 0:
-
-            live_s = historic_s
-
-        else:
-
-            live_s = osrm_baseline_s
-
-    if historic_s <= 0:
-
-        historic_s = (
-            osrm_baseline_s
-            or live_s
-        )
-
-    if osrm_baseline_s <= 0:
-
-        osrm_baseline_s = (
-            historic_s
-            or live_s
-        )
-
-    # --------------------------------------------------------
-    # GEWICHTUNG
-    # --------------------------------------------------------
-
-    live_weight = (
-        0.50
-        +
-        (
-            0.20
-            * confidence
-        )
-    )
-
-    historic_weight = 0.20
-
-    osrm_weight = (
-        1.0
-        - live_weight
-        - historic_weight
-    )
-
-    forecast_s = (
-        live_s
-        * live_weight
-        +
-        historic_s
-        * historic_weight
-        +
-        osrm_baseline_s
-        * osrm_weight
-    )
-
-    # TomTom Live enthält Verkehrsverzögerungen bereits.
-    # Deshalb KEIN vollständiges zusätzliches Addieren.
-    #
-    # Nur kleine Sicherheitskorrektur.
-    if traffic_delay_s > 0:
-
-        forecast_s += (
-            traffic_delay_s
-            * 0.10
-        )
-
-    return max(
-        0,
-        int(
-            round(
-                forecast_s
-            )
-        )
-    )
+    # Fallbacks are calculation-local. Never write them into provider observation fields.
+    effective_live = live or historic or osrm
+    effective_historic = historic or osrm or live
+    effective_osrm = osrm or historic or live
+    weight = .5 + .2 * confidence
+    value = round(weight * effective_live + .2 * effective_historic + (0.8-weight) * effective_osrm)
+    # Live already contains traffic delay: do not add it a second time.
+    return {"seconds": max(0, value),
+            "source": "weighted_reference" if historic or live else "osrm_fallback",
+            "warning": warning}
 
 
-# ============================================================
-# OSRM LEG-DATEN
-# ============================================================
+def calculate_model_forecast_s(osrm_baseline_s, tomtom_historic_s, tomtom_live_s,
+                               traffic_delay_s=0, confidence=1.0):
+    return calculate_model_forecast_details(osrm_baseline_s, tomtom_historic_s,
+                                            tomtom_live_s, traffic_delay_s, confidence)["seconds"]
 
-def extract_osrm_leg_baselines(
-    route: Dict[str, Any],
-    expected_segments: int
-) -> List[int]:
-    """
-    Erwartete Segmente:
 
-    Depot -> Stopp 1
-    Stopp 1 -> Stopp 2
-    ...
-    letzter Stopp -> Depot
-    """
-
-    legs = (
-        route.get(
-            "legs"
-        )
-        or []
-    )
-
-    durations = [
-
-        max(
-            0,
-            _safe_int(
-                leg.get(
-                    "duration"
-                )
-            )
-        )
-
-        for leg
-        in legs
-    ]
-
-    if (
-        len(
-            durations
-        )
-        == expected_segments
-    ):
-
-        return durations
-
-    # --------------------------------------------------------
-    # FALLBACK
-    # --------------------------------------------------------
-
-    total_duration = max(
-        0,
-        _safe_int(
-            route.get(
-                "duration_s"
-            )
-        )
-    )
-
+def extract_osrm_leg_baselines(route, expected_segments):
+    """Use ordered leg seconds only; total/stop-count is not a segment duration."""
+    import math
     if expected_segments <= 0:
-
         return []
-
-    if total_duration <= 0:
-
-        return [
-
-            0
-
-            for _
-            in range(
-                expected_segments
-            )
-        ]
-
-    average = (
-        total_duration
-        / expected_segments
-    )
-
-    result = [
-
-        int(
-            round(
-                average
-            )
-        )
-
-        for _
-        in range(
-            expected_segments
-        )
-    ]
-
-    difference = (
-        total_duration
-        - sum(
-            result
-        )
-    )
-
-    if result:
-
-        result[
-            -1
-        ] += difference
-
+    legs = route.get("legs") or []
+    if len(legs) != expected_segments:
+        raise ValueError("OSRM-Teilstrecken passen nicht zur Stoppreihenfolge. Route neu berechnen.")
+    result = []
+    for leg in legs:
+        try:
+            value = float(leg["duration"])
+        except (KeyError, TypeError, ValueError):
+            raise ValueError("OSRM-Teilstrecke ohne gültige Dauer in Sekunden.") from None
+        if not math.isfinite(value) or value < 0:
+            raise ValueError("Ungültige OSRM-Teilstreckendauer.")
+        result.append(round(value))
     return result
+
+
+def _provider_minutes(record, field):
+    """A total is comparable only if every segment has an observed provider value."""
+    segments = record.get("segments")
+    if segments is not None:
+        if not segments or any(_provider_minutes(part, field) is None for part in segments):
+            return None
+        return round(sum(float(part[field]) for part in segments) / 60)
+    if not record.get("tomtom_success") or _safe_float(record.get(field), 0) <= 0:
+        return None
+    return round(float(record[field]) / 60)
 
 
 # ============================================================
@@ -785,20 +612,10 @@ def calculate_segment_forecast(
 
     else:
 
-        no_traffic_s = max(
-            0,
-            _safe_int(
-                osrm_baseline_s
-            )
-        )
-
-        historic_s = (
-            no_traffic_s
-        )
-
-        live_s = (
-            no_traffic_s
-        )
+        # Missing provider observations remain missing (zero sentinel), never copied OSRM.
+        no_traffic_s = 0
+        historic_s = 0
+        live_s = 0
 
         traffic_delay_s = 0
 
@@ -810,25 +627,30 @@ def calculate_segment_forecast(
     # MODELL-FORECAST
     # --------------------------------------------------------
 
-    model_forecast_s = (
-        calculate_model_forecast_s(
+    if origin_coord == destination_coord and osrm_baseline_s == 0:
+        decision = {"seconds": 0, "source": "same_location", "warning": None}
+    else:
+        decision = (
+            calculate_model_forecast_details(
 
-            osrm_baseline_s=
-                osrm_baseline_s,
+                osrm_baseline_s=
+                    osrm_baseline_s,
 
-            tomtom_historic_s=
-                historic_s,
+                tomtom_historic_s=
+                    historic_s,
 
-            tomtom_live_s=
-                live_s,
+                tomtom_live_s=
+                    live_s,
 
-            traffic_delay_s=
-                traffic_delay_s,
+                traffic_delay_s=
+                    traffic_delay_s,
 
-            confidence=
-                confidence,
+                confidence=
+                    confidence,
+            )
         )
-    )
+
+    model_forecast_s = decision["seconds"]
 
     arrival = (
         departure_time
@@ -952,6 +774,8 @@ def calculate_segment_forecast(
         tomtom_live_s=
             live_s,
 
+        forecast_source=decision["source"],
+        forecast_warning=decision["warning"],
         model_forecast_s=
             model_forecast_s,
 
@@ -2210,6 +2034,8 @@ def segment_rows(
     ):
 
         rows.append({
+            "forecast_quelle": segment.get("forecast_source", "legacy"),
+            "forecast_hinweis": segment.get("forecast_warning"),
 
             "segment":
                 segment.get(
@@ -2255,42 +2081,21 @@ def segment_rows(
             # ------------------------------------------------
 
             "tomtom_ohne_verkehr_min":
-                round(
-                    _safe_int(
-                        segment.get(
-                            "tomtom_no_traffic_s"
-                        )
-                    )
-                    / 60
-                ),
+                _provider_minutes(segment, "tomtom_no_traffic_s"),
 
             # ------------------------------------------------
             # 3 HISTORISCH
             # ------------------------------------------------
 
             "tomtom_historisch_min":
-                round(
-                    _safe_int(
-                        segment.get(
-                            "tomtom_historic_s"
-                        )
-                    )
-                    / 60
-                ),
+                _provider_minutes(segment, "tomtom_historic_s"),
 
             # ------------------------------------------------
             # 2 LIVE
             # ------------------------------------------------
 
             "tomtom_live_min":
-                round(
-                    _safe_int(
-                        segment.get(
-                            "tomtom_live_s"
-                        )
-                    )
-                    / 60
-                ),
+                _provider_minutes(segment, "tomtom_live_s"),
 
             # ------------------------------------------------
             # 4 EIGENER FORECAST
@@ -2466,6 +2271,7 @@ def tour_summary(
     )
 
     return {
+        "forecast_warnungen": " | ".join(dict.fromkeys(s["forecast_warning"] for s in forecast.get("segments", []) if s.get("forecast_warning"))),
 
         "tour_id":
             forecast.get(
@@ -2522,42 +2328,21 @@ def tour_summary(
         # ====================================================
 
         "tomtom_ohne_verkehr_min":
-            round(
-                _safe_int(
-                    forecast.get(
-                        "tomtom_no_traffic_s"
-                    )
-                )
-                / 60
-            ),
+            _provider_minutes(forecast, "tomtom_no_traffic_s"),
 
         # ====================================================
         # 3 TOMTOM HISTORISCH
         # ====================================================
 
         "tomtom_historisch_min":
-            round(
-                _safe_int(
-                    forecast.get(
-                        "tomtom_historic_s"
-                    )
-                )
-                / 60
-            ),
+            _provider_minutes(forecast, "tomtom_historic_s"),
 
         # ====================================================
         # 2 TOMTOM LIVE
         # ====================================================
 
         "tomtom_live_min":
-            round(
-                _safe_int(
-                    forecast.get(
-                        "tomtom_live_s"
-                    )
-                )
-                / 60
-            ),
+            _provider_minutes(forecast, "tomtom_live_s"),
 
         # ====================================================
         # 4 EIGENER FORECAST

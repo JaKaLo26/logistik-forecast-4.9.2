@@ -394,6 +394,8 @@ def _segment_record(
     segment: Dict[str, Any]
 ) -> Dict[str, Any]:
     return {
+        "forecast_source": segment.get("forecast_source", "legacy"),
+        "forecast_warning": segment.get("forecast_warning"),
         "tour_id":
             forecast.get("tour_id"),
 

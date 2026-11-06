@@ -91,6 +91,13 @@ class OSRMRouter:
         trip = payload["trips"][0]
         waypoints = payload.get("waypoints", [])
 
+        if (len(payload["trips"]) != 1 or len(waypoints) != len(coordinates)
+                or any(wp.get("trips_index", 0) != 0 for wp in waypoints)
+                or sorted(wp.get("waypoint_index", -1) for wp in waypoints) != list(range(len(coordinates)))
+                or waypoints[0].get("waypoint_index") != 0
+                or len(trip.get("legs", [])) != len(coordinates)):
+            raise ValueError("OSRM-Rundreise lässt sich nicht eindeutig den Stopps zuordnen.")
+
         # waypoint_index ist die Position in der optimierten Rundreise.
         indexed = []
         for original_idx, wp in enumerate(waypoints):

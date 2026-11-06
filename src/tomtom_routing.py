@@ -586,12 +586,15 @@ class TomTomRoutingProvider:
                 )
             )
 
+            if best_s <= 0:
+                raise RuntimeError("TomTom-Antwort ohne gültige Fahrzeit.")
+
             no_traffic_s = (
                 _safe_int(
                     summary.get(
                         "noTrafficTravelTimeInSeconds"
                     ),
-                    best_s
+                    0
                 )
             )
 
@@ -600,7 +603,7 @@ class TomTomRoutingProvider:
                     summary.get(
                         "historicTrafficTravelTimeInSeconds"
                     ),
-                    best_s
+                    0
                 )
             )
 
@@ -609,7 +612,7 @@ class TomTomRoutingProvider:
                     summary.get(
                         "liveTrafficIncidentsTravelTimeInSeconds"
                     ),
-                    best_s
+                    0
                 )
             )
 

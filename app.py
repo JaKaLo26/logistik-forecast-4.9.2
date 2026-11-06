@@ -892,6 +892,9 @@ def build_forecast_markdown(summary_df):
         "",
     ]
 
+    def duration_text(value):
+        return "nicht verfügbar / unvollständig" if pd.isna(value) else f"{value} min"
+
     for _, row in summary_df.iterrows():
         ist_value = row.get("ist_fahrzeit_min")
         ist_text = "noch offen" if pd.isna(ist_value) else f"{ist_value} min"
@@ -903,8 +906,8 @@ def build_forecast_markdown(summary_df):
             "",
             "**Fahrzeitvergleich**",
             f"- 1 · OSRM Basis: **{row['osrm_basis_min']} min**",
-            f"- 2 · TomTom Live: **{row['tomtom_live_min']} min**",
-            f"- 3 · TomTom Historisch: **{row['tomtom_historisch_min']} min**",
+            f"- 2 · TomTom Live-Prognose: **{duration_text(row['tomtom_live_min'])}**",
+            f"- 3 · TomTom Historisch: **{duration_text(row['tomtom_historisch_min'])}**",
             f"- 4 · Eigener Forecast: **{row['forecast_fahrzeit_min']} min**",
             f"- 5 · IST: **{ist_text}**",
             "",
@@ -914,6 +917,7 @@ def build_forecast_markdown(summary_df):
                 f"**{row.get('service_verwendet_min', row['service_geplant_min'])} min**"
             ),
             f"- Forecast Gesamt: **{row['forecast_gesamt_min']} min**",
+            str(row.get("forecast_warnungen", "")),
             "",
         ]
 
