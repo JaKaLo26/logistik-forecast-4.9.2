@@ -96,3 +96,31 @@ python -m pytest -q
 
 Tests use generated fixtures only to verify mechanics; their scores are not evidence
 of real-world forecast quality. Real accuracy requires independently measured tours.
+
+## Datenfluss und Referenzwerte
+
+Alle internen Fahrzeiten bleiben in Sekunden. Tabellen wandeln erst bei der
+Anzeige in Minuten um. Ankunft, nächste Abfahrt und Tourensumme verwenden denselben
+Segment-Forecast; Servicezeiten werden separat addiert.
+
+Fehlende oder falsch zugeordnete OSRM-Legs führen zu einer verständlichen
+Fehlermeldung und erfordern eine neue Routenberechnung. Die gesamte Tourdauer wird
+nicht mehr gleichmäßig auf Stopps verteilt. OSRM-Trip-Waypoints müssen eine
+vollständige, eindeutige Rundreise ab Depot bilden.
+
+Fehlende TomTom-Felder bleiben als Null-Sentinel markiert. OSRM und generische
+TomTom-Reisezeiten werden nicht als beobachtete Live-/Historienwerte ausgegeben.
+Ein Tour-Livevergleich ist nur bei vollständigen Livewerten aller Segmente verfügbar;
+Teilwerte bleiben in der Segmenttabelle sichtbar. Live ist eine Prognose, keine Ist-Zeit.
+Verkehrsverzögerungen werden nicht zusätzlich auf bereits verkehrsabhängige Zeiten addiert.
+
+Modellprognosen unter der Hälfte der kleinsten positiven Referenzzeit oder über
+dem Doppelten der größten Referenzzeit werden durch die Referenzgewichtung ersetzt
+und sichtbar markiert. Diese breite technische Plausibilitätsregel ist kein
+statistisch kalibriertes Konfidenzintervall. Quelle und Warnung werden protokolliert.
+Regression: OSRM 262 min, historisch/live jeweils 341 min ergeben bei Confidence 1
+333,1 min; ein injizierter Modellwert von 40 min wird abgewiesen.
+
+Die Screenshot-Oberfläche mit „KI-Fahrzeit … Fahrerbudget“ und „TTLive= Ist-Zeit“
+ist im untersuchten Repository nicht vorhanden. Ein Fix dieser konkreten laufenden
+Oberfläche kann erst mit ihrer tatsächlichen Code-/Deployment-Version verifiziert werden.

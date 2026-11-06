@@ -113,7 +113,7 @@ def test_missing_or_incompatible_artifact_falls_back(tmp_path, monkeypatch):
 def test_forecast_existing_behavior_and_activation(tmp_path, monkeypatch):
     from src.forecast import calculate_model_forecast_s
     monkeypatch.delenv('FORECAST_MODEL_PATH', raising=False)
-    assert calculate_model_forecast_s(100, 200, 300, 20, 1) == 262
+    assert calculate_model_forecast_s(100, 200, 300, 20, 1) == 260
     path = tmp_path / 'baseline.joblib'
     joblib.dump({'schema_version': 1, 'model': None}, path)
     monkeypatch.setenv('FORECAST_MODEL_PATH', str(path))
