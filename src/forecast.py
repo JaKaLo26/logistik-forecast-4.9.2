@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from src.tomtom_routing import TomTomRoutingProvider
-from src.ml_training import predict_seconds
+from src.ml_training import predict_seconds, predict_details
 from uuid import uuid4
 
 
@@ -66,6 +66,9 @@ class SegmentForecast:
 
     tomtom_success: bool
     tomtom_error: Optional[str]
+    forecast_source: str = "Referenzberechnung"
+    forecast_warning: Optional[str] = None
+    raw_model_s: Optional[int] = None
     prediction_created_at: str = ""
     distance_m: float = 0.0
     model_id: str = "heuristic-v1"
@@ -805,20 +808,9 @@ def calculate_segment_forecast(
 
     else:
 
-        no_traffic_s = max(
-            0,
-            _safe_int(
-                osrm_baseline_s
-            )
-        )
-
-        historic_s = (
-            no_traffic_s
-        )
-
-        live_s = (
-            no_traffic_s
-        )
+        no_traffic_s = 0
+        historic_s = 0
+        live_s = 0
 
         traffic_delay_s = 0
 
@@ -851,9 +843,18 @@ def calculate_segment_forecast(
     )
 
     model_id = "heuristic-v1"
+    source, warning, raw_model_s = "Referenzberechnung", None, None
     if ml_bundle is not None:
-        model_forecast_s = predict_seconds(ml_bundle, osrm_baseline_s, osrm_distance_m, _iso(departure_time), remaining_load_kg)
-        model_id = ml_bundle["report"]["model_id"]
+        decision = predict_details(ml_bundle, osrm_baseline_s, osrm_distance_m,
+                                   _iso(departure_time), remaining_load_kg)
+        model_forecast_s = decision['seconds']
+        source, warning, raw_model_s = decision['source'], decision['warning'], decision['raw_model_s']
+        if warning and tomtom.success:
+            if live_s > 0:
+                model_forecast_s, source = live_s, "TomTom-Live-Ersatzwert"
+            elif historic_s > 0:
+                model_forecast_s, source = historic_s, "TomTom-Historie-Ersatzwert"
+        model_id = ml_bundle["report"]["model_id"] if not warning else "reference-fallback"
 
     arrival = (
         departure_time
@@ -874,6 +875,7 @@ def calculate_segment_forecast(
     actual_service_s = None
 
     return SegmentForecast(
+        forecast_source=source, forecast_warning=warning, raw_model_s=raw_model_s,
         prediction_created_at=datetime.now(timezone.utc).isoformat(),
         distance_m=osrm_distance_m,
         model_id=model_id,

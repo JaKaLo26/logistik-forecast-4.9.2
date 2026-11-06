@@ -672,7 +672,7 @@ def create_clusters(geo_json, depot_json, start_date, start_time, ml_bundle, dri
             "Fahrzeit, Service, Pausen und Rückweg wurden mit den eingetragenen Fahrerbudgets eingeplant."
         )
 
-    warnings.insert(0, "KI-Fahrzeiten zur gewählten Startzeit; synthetischer Machbarkeitsnachweis. Abfahrtszeitänderungen erfordern neue Tourgruppen.")
+    warnings.insert(0, "Modell-Fahrzeiten innerhalb des Trainingsbereichs, sonst OSRM-Ersatzwerte; synthetischer Machbarkeitsnachweis. Abfahrtszeitänderungen erfordern neue Tourgruppen.")
     if warnings:
         msg += "\n\n⚠️ " + " | ".join(warnings)
 
@@ -863,9 +863,9 @@ def render_forecast_card(vehicle_id, driver_status, segments, expanded=False):
 
     fields = (
         ("OSRM", "osrm_baseline_s"),
-        ("TTLive= Ist-Zeit", "tomtom_live_s"),
+        ("TomTom Live-Prognose", "tomtom_live_s"),
         ("TomTom historisch", "tomtom_historic_s"),
-        ("KI-Forecast", "model_forecast_s"),
+        ("Verwendeter Forecast", "model_forecast_s"),
     )
     opening = " open" if expanded else ""
     parts = [
@@ -881,11 +881,14 @@ def render_forecast_card(vehicle_id, driver_status, segments, expanded=False):
         parts.append('<div style="display:flex;flex-wrap:wrap;gap:12px;padding:8px">')
         for label, key in fields:
             value = segment.get(key)
-            if key.startswith("tomtom_") and not segment.get("tomtom_success"):
+            if key.startswith("tomtom_") and (not segment.get("tomtom_success") or not value):
                 value = None
             parts.append(f"<span>{label}: <strong>{minutes(value)}</strong></span>")
         if destination != "Depot":
             parts.append(f"<span>Service am Ziel: <strong>{minutes(segment.get('planned_service_s'))}</strong></span>")
+        if segment.get("forecast_warning"):
+            note = f"{segment['forecast_warning']} Verwendet: {segment.get('forecast_source', 'Referenz')}."
+            parts.append(f"<p>{escape(note)}</p>")
         parts.append("</div></details>")
     parts.append("</details>")
     return "".join(parts)
@@ -965,7 +968,7 @@ def calculate_all_forecasts(
                 segment.get("tomtom_success")
                 and isinstance(segment.get("tomtom_live_s"), (int, float))
                 and math.isfinite(segment["tomtom_live_s"])
-                and segment["tomtom_live_s"] >= 0
+                and segment["tomtom_live_s"] > 0
             )
         ]
         live_available = bool(segments) and not missing_live
@@ -988,7 +991,7 @@ def calculate_all_forecasts(
                 driver_status = "Fahrerbudget ungültig."
             elif not live_available:
                 ai_drive = sum(segment["model_forecast_s"] for segment in segments) / 60
-                driver_status = f"KI-Fahrzeit: {ai_drive:.0f} von {budget:.0f} min Fahrerbudget. TomTom-Livevergleich nicht verfügbar."
+                driver_status = f"Forecast-Fahrzeit: {ai_drive:.0f} von {budget:.0f} min Fahrerbudget. TomTom-Livevergleich nicht für alle Teilstrecken verfügbar."
             elif driving > budget:
                 driver_status = (
                     f"⛔ Lenkzeitbudget um {math.ceil(driving - budget)} min überschritten. "

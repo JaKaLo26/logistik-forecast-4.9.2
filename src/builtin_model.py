@@ -1,7 +1,7 @@
 """Bundled synthetic PoC model, loaded without training at app startup."""
 from pathlib import Path
 from functools import lru_cache
-from src.ml_training import load_forecast_model, features, FEATURES
+from src.ml_training import load_forecast_model, features, FEATURES, guard_prediction
 import numpy as np
 import pandas as pd
 
@@ -29,5 +29,10 @@ def predict_road_matrix(baselines_min, distances_m, departure, bundle):
             raise ValueError('Ungültige Anzahl KI-Fahrzeiten.')
         if not (np.isfinite(predictions)&(predictions>0)).all():
             raise ValueError('Ungültige KI-Fahrzeiten.')
-        for (i,j), value in zip(indices,predictions):matrix[i,j]=value/60
+        for (i,j), value in zip(indices,predictions):
+            warning = guard_prediction(bundle, matrix[i,j]*60, distances[i,j], value)
+            if not warning:
+                matrix[i,j]=value/60
+            # Otherwise retain the matching OSRM cell, in minutes.
+
     return matrix.tolist()

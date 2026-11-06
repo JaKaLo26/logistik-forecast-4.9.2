@@ -594,7 +594,7 @@ class TomTomRoutingProvider:
                     summary.get(
                         "noTrafficTravelTimeInSeconds"
                     ),
-                    best_s
+                    0
                 )
             )
 
@@ -603,7 +603,7 @@ class TomTomRoutingProvider:
                     summary.get(
                         "historicTrafficTravelTimeInSeconds"
                     ),
-                    best_s
+                    0
                 )
             )
 
@@ -612,7 +612,7 @@ class TomTomRoutingProvider:
                     summary.get(
                         "liveTrafficIncidentsTravelTimeInSeconds"
                     ),
-                    best_s
+                    0
                 )
             )
 

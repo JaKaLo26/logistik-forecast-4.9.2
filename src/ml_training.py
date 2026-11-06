@@ -139,7 +139,7 @@ def load_forecast_model(path):
                         'features': PIPELINE_FEATURES, 'data_origin': 'synthetic'}
     return bundle
 
-def predict_seconds(bundle, baseline, distance, departure, remaining_load_kg=None):
+def _raw_predict_seconds(bundle, baseline, distance, departure, remaining_load_kg=None):
     if bundle.get('schema_version') is not None:
         if bundle.get('schema_version') != '1.0.0' or bundle.get('features') != PIPELINE_FEATURES:
             raise ValueError('Incompatible pipeline model schema')
@@ -161,3 +161,31 @@ def predict_seconds(bundle, baseline, distance, departure, remaining_load_kg=Non
     return max(1, int(round(result)))
 
 
+
+
+def guard_prediction(bundle, baseline, distance, prediction):
+    """Reject unsupported extrapolation; never call a reference fallback an ML prediction."""
+    generator = bundle.get('report', {}).get('generator', {})
+    limits = generator.get('distance_m_range')
+    if limits and not float(limits[0]) <= float(distance) <= float(limits[1]):
+        return 'Strecke außerhalb des Modell-Trainingsbereichs.'
+    speed = generator.get('baseline_speed_kmh')
+    if limits and speed:
+        low, high = [float(v) / (float(speed)/3.6) for v in limits]
+        if not low <= float(baseline) <= high:
+            return 'Fahrzeit außerhalb des Modell-Trainingsbereichs.'
+    if float(prediction) < .5 * float(baseline):
+        return 'Modellzeit unplausibel kurz gegenüber OSRM.'
+    return None
+
+
+def predict_details(bundle, baseline, distance, departure, remaining_load_kg=None):
+    raw = _raw_predict_seconds(bundle, baseline, distance, departure, remaining_load_kg)
+    warning = guard_prediction(bundle, baseline, distance, raw)
+    return {'seconds': max(1, int(round(baseline))) if warning else raw,
+            'raw_model_s': raw, 'warning': warning,
+            'source': 'OSRM-Ersatzwert' if warning else 'KI-Modell'}
+
+
+def predict_seconds(bundle, baseline, distance, departure, remaining_load_kg=None):
+    return predict_details(bundle, baseline, distance, departure, remaining_load_kg)['seconds']

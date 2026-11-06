@@ -94,3 +94,25 @@ Kein Anspruch auf vollständige rechtliche Compliance-Prüfung.
 Prüfung: 3 neue Fahrertests und 9 vorhandene Planungstests bestanden;
 App-Callbacktest ergänzt um Fahrerzuordnung, erhaltene Vorzeit und 45min Pause.
 Erneute App-Callbackprüfung nach Installation der lokalen Proxy-Abhängigkeit erfolgreich.
+
+## Datenflusskorrektur: lange Strecken
+
+Das eingebaute Modell wurde auf synthetischen Segmenten von 2–25 km bei
+45 km/h Basisgeschwindigkeit trainiert. Ein Test mit 262 min / 300 km ergibt
+roh rund 39 min: der Random Forest extrapoliert die absolute Fahrzeit nicht.
+
+Planungsmatrix und Segmentforecast prüfen jetzt dieselben Modellgrenzen aus den
+Artefakt-Metadaten (Distanz und daraus folgende Basisfahrzeit). Außerhalb davon
+bleibt OSRM in der Planung maßgeblich; im Segmentforecast hat ein vorhandener
+TomTom-Livewert Vorrang, anschließend Historie, dann OSRM. Auch Modellzeiten unter
+50 % der OSRM-Basis werden als unplausibel verworfen. Diese technische Regel
+ist kein statistisches Konfidenzintervall. Innerhalb des Bereichs bleibt das
+Modell unverändert. Es findet kein neues Training statt.
+
+Verwendeter Wert, Quelle, Warnung und roher Modellwert werden getrennt geführt.
+Die Karte zeigt Ersatzwerte ausdrücklich an; Live wird nicht mehr als Ist-Zeit
+bezeichnet. Fehlende TomTom-Felder werden nicht mit OSRM/generischen Zeiten
+aufgefüllt. Ein vollständiger Tour-Livevergleich erfordert Werte aller Segmente.
+
+Regressionstests mit dem tatsächlich ausgelieferten Modell prüfen den langen
+Streckenfall sowie Planung, Fallback, Ankunftskette und Tourensumme.
