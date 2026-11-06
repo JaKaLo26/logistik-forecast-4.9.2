@@ -43,7 +43,8 @@ def test_long_segment_live_fallback_propagates_to_eta_and_total():
     from datetime import datetime
     a=datetime.fromisoformat(segment['departure_time'])
     b=datetime.fromisoformat(segment['arrival_time_forecast'])
-    assert (b-a).total_seconds()==341*60
+    assert (b-a).total_seconds()==(341+45)*60
+    assert segment["planned_break_s"] == 45*60
 
 
 def test_long_segment_without_live_uses_osrm_not_fake_tomtom():

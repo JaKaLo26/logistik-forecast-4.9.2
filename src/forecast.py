@@ -12,9 +12,36 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from src.clustering import plan_day
 from src.tomtom_routing import TomTomRoutingProvider
 from src.ml_training import predict_seconds, predict_details
 from uuid import uuid4
+
+
+def _forecast_break_plan(segments, driver_profile):
+    return plan_day(
+        [float(s.get("actual_travel_s") if s.get("actual_travel_s") is not None
+               else s["model_forecast_s"]) / 60 for s in segments],
+        [_effective_service_s(s) / 60 for s in segments],
+        driver_profile or {},
+    )
+
+
+def _apply_segment_breaks(segment, previous, departure, driver_profile):
+    """Keep driving targets separate from breaks; shift arrival and service end."""
+    before = _forecast_break_plan(previous, driver_profile)
+    report = _forecast_break_plan(previous + [segment], driver_profile)
+    events = [e for e in report["break_events"] if e["leg_index"] == len(previous)]
+    drive_break_s = sum(round(e["duration_min"] * 60) for e in events if e["during"] == "drive")
+    service_break_s = sum(round(e["duration_min"] * 60) for e in events if e["during"] == "service")
+    segment["planned_break_s"] = drive_break_s + service_break_s
+    segment["break_during_drive_s"] = drive_break_s
+    segment["break_during_service_s"] = service_break_s
+    segment["break_events"] = [dict(e, starts_at=_iso(departure + timedelta(
+        seconds=round((e["after_elapsed_min"] - before["tourdauer_min"]) * 60)))) for e in events]
+    arrival = departure + timedelta(seconds=segment["model_forecast_s"] + drive_break_s)
+    segment["arrival_time_forecast"] = _iso(arrival)
+    return arrival + timedelta(seconds=_effective_service_s(segment) + service_break_s)
 
 
 # ============================================================
@@ -1039,6 +1066,7 @@ def calculate_tour_forecast(
     depot: Dict[str, Any],
     start_time: Any,
     ml_bundle=None,
+    driver_profile: Optional[Dict[str, Any]] = None,
 
     api_key: Optional[str] = None,
     timeout: int = 20,
@@ -1456,7 +1484,7 @@ def calculate_tour_forecast(
                 +
                 timedelta(
                     seconds=
-                        travel_s
+                        travel_s + _safe_int(old.get("break_during_drive_s"))
                 )
             )
 
@@ -1550,9 +1578,7 @@ def calculate_tour_forecast(
 
                     timedelta(
                         seconds=
-                            _effective_service_s(
-                                old
-                            )
+                            (_effective_service_s(old) + _safe_int(old.get("break_during_service_s")))
                     )
                 )
 
@@ -1574,9 +1600,7 @@ def calculate_tour_forecast(
 
                 timedelta(
                     seconds=
-                        _effective_service_s(
-                            old
-                        )
+                        (_effective_service_s(old) + _safe_int(old.get("break_during_service_s")))
                 )
             )
 
@@ -1634,39 +1658,9 @@ def calculate_tour_forecast(
             )
         )
 
-        segment_dict = (
-            segment.to_dict()
-        )
-
-        segments.append(
-            segment_dict
-        )
-
-        # ----------------------------------------------------
-        # ANKUNFT
-        # ----------------------------------------------------
-
-        current_time += timedelta(
-
-            seconds=
-                segment.model_forecast_s
-        )
-
-        # ----------------------------------------------------
-        # SERVICE AM ZIELSTOPP
-        # ----------------------------------------------------
-
-        current_time += timedelta(
-
-            seconds=
-                _effective_service_s(
-                    segment_dict
-                )
-        )
-
-    # ========================================================
-    # TOURSUMMEN
-    # ========================================================
+        segment_dict = segment.to_dict()
+        current_time = _apply_segment_breaks(segment_dict, segments, current_time, driver_profile)
+        segments.append(segment_dict)
 
     osrm_baseline_s = sum(
 
@@ -1932,6 +1926,10 @@ def calculate_tour_forecast(
     )
 
     result = tour.to_dict()
+    result["driver_profile"] = dict(driver_profile or {})
+    result["driver_time_plan"] = _forecast_break_plan(segments, driver_profile)
+    result["planned_break_s"] = sum(s.get("planned_break_s", 0) for s in segments)
+    result["break_policy"] = "45 Minuten nach spätestens 270 Minuten Lenkzeit; Service ist Arbeit. Pausenorte ungeprüft."
     result["schema_version"] = 2
     result["run_id"] = str(uuid4())
     result["vehicle_parameters"] = dict(vehicle_parameters or {})
@@ -2217,6 +2215,8 @@ def recalculate_tour_from_stop(
                 str(
                     from_stop_id
                 ),
+
+            driver_profile=previous_forecast.get("driver_profile", {}),
 
             previous_segments=
                 old_segments,

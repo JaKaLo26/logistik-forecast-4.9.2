@@ -886,6 +886,10 @@ def render_forecast_card(vehicle_id, driver_status, segments, expanded=False):
             parts.append(f"<span>{label}: <strong>{minutes(value)}</strong></span>")
         if destination != "Depot":
             parts.append(f"<span>Service am Ziel: <strong>{minutes(segment.get('planned_service_s'))}</strong></span>")
+        if segment.get("planned_break_s"):
+            parts.append(f"<p>Geplante Fahrt-/Arbeitsunterbrechung: <strong>{minutes(segment['planned_break_s'])}</strong>. In Ankunft bzw. Folgeabfahrt berücksichtigt. Pausenort noch zu prüfen.</p>")
+        if segment.get("arrival_time_forecast"):
+            parts.append(f"<p>Ankunft inklusive Fahrtunterbrechungen: {escape(str(segment['arrival_time_forecast']))}</p>")
         if segment.get("forecast_warning"):
             note = f"{segment['forecast_warning']} Verwendet: {segment.get('forecast_source', 'Referenz')}."
             parts.append(f"<p>{escape(note)}</p>")
@@ -947,6 +951,10 @@ def calculate_all_forecasts(
                 tour_id=tour_id,
                 forecast_version=1,
                 vehicle_parameters=params,
+                driver_profile={} if vehicle_rows.empty else {
+                    key: float(vehicle_rows.iloc[0].get(key, value))
+                    for key, value in DRIVER_DEFAULTS.items()
+                },
             )
         except Exception as exc:
             debug.append({
@@ -1003,6 +1011,9 @@ def calculate_all_forecasts(
                     f"nach der Tour (TTLive: {driving:.0f} von {budget:.0f} min inklusive Rückfahrt)."
                 )
 
+        driver_status += f" Geplante Pausen: {forecast.get('planned_break_s', 0) / 60:.0f} min."
+        if not forecast.get("driver_time_plan", {}).get("feasible", True):
+            driver_status += " ⛔ Forecast überschreitet Fahrerzeitbudget einschließlich Arbeit/Pausen. Tour neu planen."
         deviations.append(f"- **{vehicle_id}** · {difference}")
         tour_cards[vehicle_id] = render_forecast_card(vehicle_id, driver_status, segments, expanded=True)
 
