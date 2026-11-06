@@ -53,3 +53,11 @@ Die offizielle Autobahn-API ist als Adapter vorhanden. Die produktive räumliche
 ```bash
 pip install -r requirements.txt
 python app.py
+```
+
+## Optionales ML-Training
+
+Eine zeitlich und nach Touren getrennte Trainingspipeline mit Modellvergleich,
+Backtesting und MAE/RMSE/MAPE ist jetzt über `python -m src.ml_training` verfügbar.
+Sie benötigt gemessene Ist-Fahrzeiten. Details, CSV-Schema und Aktivierung:
+[Forecast-Training](docs/forecast_training.md).

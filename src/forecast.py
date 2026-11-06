@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from src.tomtom_routing import TomTomRoutingProvider
+from src.ml_predict import predict_if_configured
 
 
 # ============================================================
@@ -479,6 +480,12 @@ def calculate_model_forecast_s(
         0.0,
         1.0,
     )
+
+    prediction = predict_if_configured(
+        osrm_baseline_s, historic_s, live_s, traffic_delay_s, confidence
+    )
+    if prediction is not None:
+        return prediction
 
     # --------------------------------------------------------
     # FALLBACKS

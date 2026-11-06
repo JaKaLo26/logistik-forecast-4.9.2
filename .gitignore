@@ -5,3 +5,8 @@ __pycache__/
 venv/
 *.log
 .DS_Store
+
+training_runs/
+*.joblib
+__pycache__/
+.pytest_cache/
