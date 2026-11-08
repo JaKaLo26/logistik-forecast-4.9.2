@@ -108,8 +108,38 @@ def road_matrix(coordinates, *, include_distances=False):
     return (matrix, distances) if include_distances else matrix
 
 
+def assignment_failure_reason(row, fleet, outbound, inbound):
+    """Diagnose the direct single-order tour, without claiming global infeasibility."""
+    if not fleet:
+        return 'Kein verfügbarer LKW/Fahrer vorhanden.'
+    capable = [v for v in fleet if row['paletten'] <= float(v['pallet_capacity'])
+               and row['gesamtgewicht_kg'] <= float(v['payload_kg'])]
+    if not capable:
+        return (f"Auftrag überschreitet Fahrzeugkapazität: {row['paletten']} Paletten, "
+                f"{row['gesamtgewicht_kg']:.0f} kg. Auftrag teilen oder passendes Fahrzeug bereitstellen.")
+    if not math.isfinite(outbound) or not math.isfinite(inbound):
+        return 'Keine vollständige Straßenverbindung für Depot–Kunde–Depot verfügbar; Adresse/Route prüfen.'
+    alternatives = []
+    for v in capable:
+        b = {k: number(v.get(k, default), k) for k, default in DRIVER_DEFAULTS.items()}
+        report = plan_day([outbound, inbound], [row['service_min']], v)
+        if report['feasible']:
+            return 'Einzeltour möglich, aber kein freier passender LKW/Fahrer in der aktuellen Zuordnung; Flotte erweitern oder Touren neu verteilen.'
+        drive_limit = min(540, b['remaining_drive_min'], b['remaining_week_drive_min'], b['remaining_fortnight_drive_min'])
+        duty_limit = min(780, b['remaining_duty_min'], b['minutes_until_weekly_rest'])
+        checks = [('Lenkzeit inklusive Rückfahrt', report['fahrzeit_min'], drive_limit),
+                  ('Arbeitszeit inklusive Service', report['fahrzeit_min'] + report['service_min'], b['remaining_work_min']),
+                  ('Tourdauer inklusive Pausen', report['tourdauer_min'], duty_limit)]
+        exceeded = [f'{label}: {actual:.1f} > {limit:.1f} min (+{actual-limit:.1f})'
+                    for label, actual, limit in checks if actual > limit + 1e-8]
+        score = sum(max(0, actual-limit) for _, actual, limit in checks)
+        alternatives.append((score, '; '.join(exceeded)))
+    return ('Direkte Einzeltour überschreitet das Fahrerzeitprofil: ' + min(alternatives)[1]
+            + '. Näheres Depot oder gesonderte Mehrtagesplanung erforderlich; zusätzliche LKW allein ändern die Fahrtdauer nicht.')
+
+
 def cluster_orders(orders, vehicles, depot, durations=None):
-    columns = list(orders.columns) + ['cluster_id', 'vehicle_id', 'cluster_sequence']
+    columns = list(orders.columns) + ['cluster_id', 'vehicle_id', 'cluster_sequence', 'zuordnungsgrund']
     empty = pd.DataFrame(columns=list(dict.fromkeys(columns)))
     if orders.empty:
         return empty, pd.DataFrame(), ['Keine Aufträge vorhanden.']
@@ -169,7 +199,7 @@ def cluster_orders(orders, vehicles, depot, durations=None):
             continue
         cid = f'REGION-{len(summaries)+1:02d}'
         for position, item in enumerate(sequence, 1):
-            assigned.append({**rows[item-1], 'cluster_id': cid, 'vehicle_id': vehicle['vehicle_id'], 'cluster_sequence': position})
+            assigned.append({**rows[item-1], 'cluster_id': cid, 'vehicle_id': vehicle['vehicle_id'], 'cluster_sequence': position, 'zuordnungsgrund': 'Zugewiesen'})
         summaries.append({'cluster_id': cid, 'vehicle_id': vehicle['vehicle_id'], 'fahrer': vehicle.get('driver_id', ''), 'stopps': len(sequence),
                           'pausenplan': str(report['break_events']),
                           'restlenkzeit_nach_tour_min': round(float(vehicle.get('remaining_drive_min',540))-report['fahrzeit_min'],2),
@@ -178,7 +208,8 @@ def cluster_orders(orders, vehicles, depot, durations=None):
                           'gewicht_auslastung_pct': round(100*used_w/float(vehicle['payload_kg']), 1) if float(vehicle['payload_kg']) else 0,
                           **{k:v for k,v in report.items() if k not in ('break_events', 'feasible')}})
     for item in open_ids:
-        assigned.append({**rows[item-1], 'cluster_id': 'NICHT ZUGEWIESEN', 'vehicle_id': 'NICHT ZUGEWIESEN', 'cluster_sequence': 0})
+        assigned.append({**rows[item-1], 'cluster_id': 'NICHT ZUGEWIESEN', 'vehicle_id': 'NICHT ZUGEWIESEN', 'cluster_sequence': 0,
+                         'zuordnungsgrund': assignment_failure_reason(rows[item-1], fleet, matrix[0][item] if matrix is not None else math.inf, matrix[item][0] if matrix is not None else math.inf)})
     if open_ids:
         warnings.append(f'{len(open_ids)} Aufträge offen: keine zulässige Einfügung bei Straßen-, Kapazitäts- und Zeitprüfung gefunden. Kein Nachweis globaler Unlösbarkeit.')
     return pd.DataFrame(assigned, columns=empty.columns), pd.DataFrame(summaries), warnings

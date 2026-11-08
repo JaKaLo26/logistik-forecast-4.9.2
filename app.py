@@ -663,9 +663,11 @@ def create_clusters(geo_json, depot_json, start_date, start_time, ml_bundle, dri
         count = int(unassigned.sum())
         msg = (
             f"❌ **Fehler: {count} von {len(orders)} Aufträgen konnten keinem Lkw "
-            "zugewiesen werden.** Prüfe Kapazität, Nutzlast und Fahrerzeitbudgets. "
+            "zugewiesen werden.** Die konkreten Gründe stehen je Auftrag in der Tabelle. "
             "Die Routenoptimierung ist erst bei vollständiger Zuordnung möglich."
         )
+        reasons = assignments.loc[unassigned, "zuordnungsgrund"].value_counts()
+        msg += "\n\n" + "\n".join(f"- {n} Auftrag/Aufträge: {reason}" for reason, n in reasons.items())
     else:
         msg = (
             f"✅ Benötigt: {len(planned_fleet)} Fahrer und {len(planned_fleet)} Lkw eingeplant ({small_index} × 14 t, {large_index} × 40 t). "
@@ -685,6 +687,7 @@ def create_clusters(geo_json, depot_json, start_date, start_time, ml_bundle, dri
             "adresse",
             "paletten",
             "gesamtgewicht_kg",
+            "zuordnungsgrund",
         ]
     ].copy()
 
