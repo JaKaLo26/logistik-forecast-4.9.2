@@ -1,0 +1,161 @@
+auftrag,kunde,strasse,plz,ort,paletten,warengewicht_kg,service_min,bundesland,adressstatus
+BW-001,Testkunde BW 01,Königstraße,70173,Stuttgart,1,250,10,Baden-Württemberg,ungeprüfte Straßenangabe ohne Hausnummer
+BW-002,Testkunde BW 02,Theodor-Heuss-Straße,70173,Stuttgart,2,600,15,Baden-Württemberg,ungeprüfte Straßenangabe ohne Hausnummer
+BW-003,Testkunde BW 03,Friedrichstraße,70173,Stuttgart,3,1050,20,Baden-Württemberg,ungeprüfte Straßenangabe ohne Hausnummer
+BW-004,Testkunde BW 04,Lautenschlagerstraße,70173,Stuttgart,4,1600,25,Baden-Württemberg,ungeprüfte Straßenangabe ohne Hausnummer
+BW-005,Testkunde BW 05,Kronenstraße,70173,Stuttgart,1,450,10,Baden-Württemberg,ungeprüfte Straßenangabe ohne Hausnummer
+BW-006,Testkunde BW 06,Bolzstraße,70173,Stuttgart,2,500,15,Baden-Württemberg,ungeprüfte Straßenangabe ohne Hausnummer
+BW-007,Testkunde BW 07,Schlossstraße,70173,Stuttgart,3,900,20,Baden-Württemberg,ungeprüfte Straßenangabe ohne Hausnummer
+BW-008,Testkunde BW 08,Eberhardstraße,70173,Stuttgart,4,1400,25,Baden-Württemberg,ungeprüfte Straßenangabe ohne Hausnummer
+BW-009,Testkunde BW 09,Tübinger Straße,70173,Stuttgart,1,400,10,Baden-Württemberg,ungeprüfte Straßenangabe ohne Hausnummer
+BW-010,Testkunde BW 10,Marienstraße,70173,Stuttgart,2,900,15,Baden-Württemberg,ungeprüfte Straßenangabe ohne Hausnummer
+BY-001,Testkunde BY 01,Marienplatz,80331,München,1,250,10,Bayern,ungeprüfte Straßenangabe ohne Hausnummer
+BY-002,Testkunde BY 02,Tal,80331,München,2,600,15,Bayern,ungeprüfte Straßenangabe ohne Hausnummer
+BY-003,Testkunde BY 03,Sendlinger Straße,80331,München,3,1050,20,Bayern,ungeprüfte Straßenangabe ohne Hausnummer
+BY-004,Testkunde BY 04,Kaufingerstraße,80331,München,4,1600,25,Bayern,ungeprüfte Straßenangabe ohne Hausnummer
+BY-005,Testkunde BY 05,Neuhauser Straße,80331,München,1,450,10,Bayern,ungeprüfte Straßenangabe ohne Hausnummer
+BY-006,Testkunde BY 06,Rindermarkt,80331,München,2,500,15,Bayern,ungeprüfte Straßenangabe ohne Hausnummer
+BY-007,Testkunde BY 07,Viktualienmarkt,80331,München,3,900,20,Bayern,ungeprüfte Straßenangabe ohne Hausnummer
+BY-008,Testkunde BY 08,Theatinerstraße,80331,München,4,1400,25,Bayern,ungeprüfte Straßenangabe ohne Hausnummer
+BY-009,Testkunde BY 09,Weinstraße,80331,München,1,400,10,Bayern,ungeprüfte Straßenangabe ohne Hausnummer
+BY-010,Testkunde BY 10,Dienerstraße,80331,München,2,900,15,Bayern,ungeprüfte Straßenangabe ohne Hausnummer
+BE-001,Testkunde BE 01,Friedrichstraße,10117,Berlin,1,250,10,Berlin,ungeprüfte Straßenangabe ohne Hausnummer
+BE-002,Testkunde BE 02,Unter den Linden,10117,Berlin,2,600,15,Berlin,ungeprüfte Straßenangabe ohne Hausnummer
+BE-003,Testkunde BE 03,Wilhelmstraße,10117,Berlin,3,1050,20,Berlin,ungeprüfte Straßenangabe ohne Hausnummer
+BE-004,Testkunde BE 04,Leipziger Straße,10117,Berlin,4,1600,25,Berlin,ungeprüfte Straßenangabe ohne Hausnummer
+BE-005,Testkunde BE 05,Charlottenstraße,10117,Berlin,1,450,10,Berlin,ungeprüfte Straßenangabe ohne Hausnummer
+BE-006,Testkunde BE 06,Französische Straße,10117,Berlin,2,500,15,Berlin,ungeprüfte Straßenangabe ohne Hausnummer
+BE-007,Testkunde BE 07,Taubenstraße,10117,Berlin,3,900,20,Berlin,ungeprüfte Straßenangabe ohne Hausnummer
+BE-008,Testkunde BE 08,Jägerstraße,10117,Berlin,4,1400,25,Berlin,ungeprüfte Straßenangabe ohne Hausnummer
+BE-009,Testkunde BE 09,Behrenstraße,10117,Berlin,1,400,10,Berlin,ungeprüfte Straßenangabe ohne Hausnummer
+BE-010,Testkunde BE 10,Mohrenstraße,10117,Berlin,2,900,15,Berlin,ungeprüfte Straßenangabe ohne Hausnummer
+BB-001,Testkunde BB 01,Brandenburger Straße,14467,Potsdam,1,250,10,Brandenburg,ungeprüfte Straßenangabe ohne Hausnummer
+BB-002,Testkunde BB 02,Friedrich-Ebert-Straße,14467,Potsdam,2,600,15,Brandenburg,ungeprüfte Straßenangabe ohne Hausnummer
+BB-003,Testkunde BB 03,Charlottenstraße,14467,Potsdam,3,1050,20,Brandenburg,ungeprüfte Straßenangabe ohne Hausnummer
+BB-004,Testkunde BB 04,Gutenbergstraße,14467,Potsdam,4,1600,25,Brandenburg,ungeprüfte Straßenangabe ohne Hausnummer
+BB-005,Testkunde BB 05,Lindenstraße,14467,Potsdam,1,450,10,Brandenburg,ungeprüfte Straßenangabe ohne Hausnummer
+BB-006,Testkunde BB 06,Dortustraße,14467,Potsdam,2,500,15,Brandenburg,ungeprüfte Straßenangabe ohne Hausnummer
+BB-007,Testkunde BB 07,Benkertstraße,14467,Potsdam,3,900,20,Brandenburg,ungeprüfte Straßenangabe ohne Hausnummer
+BB-008,Testkunde BB 08,Mittelstraße,14467,Potsdam,4,1400,25,Brandenburg,ungeprüfte Straßenangabe ohne Hausnummer
+BB-009,Testkunde BB 09,Hebbelstraße,14467,Potsdam,1,400,10,Brandenburg,ungeprüfte Straßenangabe ohne Hausnummer
+BB-010,Testkunde BB 10,Hegelallee,14467,Potsdam,2,900,15,Brandenburg,ungeprüfte Straßenangabe ohne Hausnummer
+HB-001,Testkunde HB 01,Am Wall,28195,Bremen,1,250,10,Bremen,ungeprüfte Straßenangabe ohne Hausnummer
+HB-002,Testkunde HB 02,Obernstraße,28195,Bremen,2,600,15,Bremen,ungeprüfte Straßenangabe ohne Hausnummer
+HB-003,Testkunde HB 03,Sögestraße,28195,Bremen,3,1050,20,Bremen,ungeprüfte Straßenangabe ohne Hausnummer
+HB-004,Testkunde HB 04,Langenstraße,28195,Bremen,4,1600,25,Bremen,ungeprüfte Straßenangabe ohne Hausnummer
+HB-005,Testkunde HB 05,Martinistraße,28195,Bremen,1,450,10,Bremen,ungeprüfte Straßenangabe ohne Hausnummer
+HB-006,Testkunde HB 06,Domsheide,28195,Bremen,2,500,15,Bremen,ungeprüfte Straßenangabe ohne Hausnummer
+HB-007,Testkunde HB 07,Herdentorsteinweg,28195,Bremen,3,900,20,Bremen,ungeprüfte Straßenangabe ohne Hausnummer
+HB-008,Testkunde HB 08,Bahnhofstraße,28195,Bremen,4,1400,25,Bremen,ungeprüfte Straßenangabe ohne Hausnummer
+HB-009,Testkunde HB 09,Contrescarpe,28195,Bremen,1,400,10,Bremen,ungeprüfte Straßenangabe ohne Hausnummer
+HB-010,Testkunde HB 10,Knochenhauerstraße,28195,Bremen,2,900,15,Bremen,ungeprüfte Straßenangabe ohne Hausnummer
+HH-001,Testkunde HH 01,Mönckebergstraße,20095,Hamburg,1,250,10,Hamburg,ungeprüfte Straßenangabe ohne Hausnummer
+HH-002,Testkunde HH 02,Spitalerstraße,20095,Hamburg,2,600,15,Hamburg,ungeprüfte Straßenangabe ohne Hausnummer
+HH-003,Testkunde HH 03,Steinstraße,20095,Hamburg,3,1050,20,Hamburg,ungeprüfte Straßenangabe ohne Hausnummer
+HH-004,Testkunde HH 04,Bergstraße,20095,Hamburg,4,1600,25,Hamburg,ungeprüfte Straßenangabe ohne Hausnummer
+HH-005,Testkunde HH 05,Rathausstraße,20095,Hamburg,1,450,10,Hamburg,ungeprüfte Straßenangabe ohne Hausnummer
+HH-006,Testkunde HH 06,Lilienstraße,20095,Hamburg,2,500,15,Hamburg,ungeprüfte Straßenangabe ohne Hausnummer
+HH-007,Testkunde HH 07,Rosenstraße,20095,Hamburg,3,900,20,Hamburg,ungeprüfte Straßenangabe ohne Hausnummer
+HH-008,Testkunde HH 08,Kurze Mühren,20095,Hamburg,4,1400,25,Hamburg,ungeprüfte Straßenangabe ohne Hausnummer
+HH-009,Testkunde HH 09,Glockengießerwall,20095,Hamburg,1,400,10,Hamburg,ungeprüfte Straßenangabe ohne Hausnummer
+HH-010,Testkunde HH 10,Altstädter Straße,20095,Hamburg,2,900,15,Hamburg,ungeprüfte Straßenangabe ohne Hausnummer
+HE-001,Testkunde HE 01,Langgasse,65183,Wiesbaden,1,250,10,Hessen,ungeprüfte Straßenangabe ohne Hausnummer
+HE-002,Testkunde HE 02,Kirchgasse,65183,Wiesbaden,2,600,15,Hessen,ungeprüfte Straßenangabe ohne Hausnummer
+HE-003,Testkunde HE 03,Marktstraße,65183,Wiesbaden,3,1050,20,Hessen,ungeprüfte Straßenangabe ohne Hausnummer
+HE-004,Testkunde HE 04,Michelsberg,65183,Wiesbaden,4,1600,25,Hessen,ungeprüfte Straßenangabe ohne Hausnummer
+HE-005,Testkunde HE 05,Neugasse,65183,Wiesbaden,1,450,10,Hessen,ungeprüfte Straßenangabe ohne Hausnummer
+HE-006,Testkunde HE 06,Grabenstraße,65183,Wiesbaden,2,500,15,Hessen,ungeprüfte Straßenangabe ohne Hausnummer
+HE-007,Testkunde HE 07,Mühlgasse,65183,Wiesbaden,3,900,20,Hessen,ungeprüfte Straßenangabe ohne Hausnummer
+HE-008,Testkunde HE 08,Wagemannstraße,65183,Wiesbaden,4,1400,25,Hessen,ungeprüfte Straßenangabe ohne Hausnummer
+HE-009,Testkunde HE 09,Webergasse,65183,Wiesbaden,1,400,10,Hessen,ungeprüfte Straßenangabe ohne Hausnummer
+HE-010,Testkunde HE 10,Spiegelgasse,65183,Wiesbaden,2,900,15,Hessen,ungeprüfte Straßenangabe ohne Hausnummer
+MV-001,Testkunde MV 01,Mecklenburgstraße,19053,Schwerin,1,250,10,Mecklenburg-Vorpommern,ungeprüfte Straßenangabe ohne Hausnummer
+MV-002,Testkunde MV 02,Schloßstraße,19053,Schwerin,2,600,15,Mecklenburg-Vorpommern,ungeprüfte Straßenangabe ohne Hausnummer
+MV-003,Testkunde MV 03,Goethestraße,19053,Schwerin,3,1050,20,Mecklenburg-Vorpommern,ungeprüfte Straßenangabe ohne Hausnummer
+MV-004,Testkunde MV 04,Graf-Schack-Allee,19053,Schwerin,4,1600,25,Mecklenburg-Vorpommern,ungeprüfte Straßenangabe ohne Hausnummer
+MV-005,Testkunde MV 05,Lennéstraße,19053,Schwerin,1,450,10,Mecklenburg-Vorpommern,ungeprüfte Straßenangabe ohne Hausnummer
+MV-006,Testkunde MV 06,Schmiedestraße,19053,Schwerin,2,500,15,Mecklenburg-Vorpommern,ungeprüfte Straßenangabe ohne Hausnummer
+MV-007,Testkunde MV 07,Geschwister-Scholl-Straße,19053,Schwerin,3,900,20,Mecklenburg-Vorpommern,ungeprüfte Straßenangabe ohne Hausnummer
+MV-008,Testkunde MV 08,Wallstraße,19053,Schwerin,4,1400,25,Mecklenburg-Vorpommern,ungeprüfte Straßenangabe ohne Hausnummer
+MV-009,Testkunde MV 09,Wismarsche Straße,19053,Schwerin,1,400,10,Mecklenburg-Vorpommern,ungeprüfte Straßenangabe ohne Hausnummer
+MV-010,Testkunde MV 10,Marienplatz,19053,Schwerin,2,900,15,Mecklenburg-Vorpommern,ungeprüfte Straßenangabe ohne Hausnummer
+NI-001,Testkunde NI 01,Georgstraße,30159,Hannover,1,250,10,Niedersachsen,ungeprüfte Straßenangabe ohne Hausnummer
+NI-002,Testkunde NI 02,Bahnhofstraße,30159,Hannover,2,600,15,Niedersachsen,ungeprüfte Straßenangabe ohne Hausnummer
+NI-003,Testkunde NI 03,Karmarschstraße,30159,Hannover,3,1050,20,Niedersachsen,ungeprüfte Straßenangabe ohne Hausnummer
+NI-004,Testkunde NI 04,Schmiedestraße,30159,Hannover,4,1600,25,Niedersachsen,ungeprüfte Straßenangabe ohne Hausnummer
+NI-005,Testkunde NI 05,Osterstraße,30159,Hannover,1,450,10,Niedersachsen,ungeprüfte Straßenangabe ohne Hausnummer
+NI-006,Testkunde NI 06,Große Packhofstraße,30159,Hannover,2,500,15,Niedersachsen,ungeprüfte Straßenangabe ohne Hausnummer
+NI-007,Testkunde NI 07,Kleine Packhofstraße,30159,Hannover,3,900,20,Niedersachsen,ungeprüfte Straßenangabe ohne Hausnummer
+NI-008,Testkunde NI 08,Luisenstraße,30159,Hannover,4,1400,25,Niedersachsen,ungeprüfte Straßenangabe ohne Hausnummer
+NI-009,Testkunde NI 09,Rathenaustraße,30159,Hannover,1,400,10,Niedersachsen,ungeprüfte Straßenangabe ohne Hausnummer
+NI-010,Testkunde NI 10,Prinzenstraße,30159,Hannover,2,900,15,Niedersachsen,ungeprüfte Straßenangabe ohne Hausnummer
+NW-001,Testkunde NW 01,Berger Straße,40213,Düsseldorf,1,250,10,Nordrhein-Westfalen,ungeprüfte Straßenangabe ohne Hausnummer
+NW-002,Testkunde NW 02,Bolkerstraße,40213,Düsseldorf,2,600,15,Nordrhein-Westfalen,ungeprüfte Straßenangabe ohne Hausnummer
+NW-003,Testkunde NW 03,Flinger Straße,40213,Düsseldorf,3,1050,20,Nordrhein-Westfalen,ungeprüfte Straßenangabe ohne Hausnummer
+NW-004,Testkunde NW 04,Marktstraße,40213,Düsseldorf,4,1600,25,Nordrhein-Westfalen,ungeprüfte Straßenangabe ohne Hausnummer
+NW-005,Testkunde NW 05,Mittelstraße,40213,Düsseldorf,1,450,10,Nordrhein-Westfalen,ungeprüfte Straßenangabe ohne Hausnummer
+NW-006,Testkunde NW 06,Mühlenstraße,40213,Düsseldorf,2,500,15,Nordrhein-Westfalen,ungeprüfte Straßenangabe ohne Hausnummer
+NW-007,Testkunde NW 07,Neustraße,40213,Düsseldorf,3,900,20,Nordrhein-Westfalen,ungeprüfte Straßenangabe ohne Hausnummer
+NW-008,Testkunde NW 08,Grabenstraße,40213,Düsseldorf,4,1400,25,Nordrhein-Westfalen,ungeprüfte Straßenangabe ohne Hausnummer
+NW-009,Testkunde NW 09,Kapuzinergasse,40213,Düsseldorf,1,400,10,Nordrhein-Westfalen,ungeprüfte Straßenangabe ohne Hausnummer
+NW-010,Testkunde NW 10,Hunsrückenstraße,40213,Düsseldorf,2,900,15,Nordrhein-Westfalen,ungeprüfte Straßenangabe ohne Hausnummer
+RP-001,Testkunde RP 01,Große Bleiche,55116,Mainz,1,250,10,Rheinland-Pfalz,ungeprüfte Straßenangabe ohne Hausnummer
+RP-002,Testkunde RP 02,Große Langgasse,55116,Mainz,2,600,15,Rheinland-Pfalz,ungeprüfte Straßenangabe ohne Hausnummer
+RP-003,Testkunde RP 03,Ludwigsstraße,55116,Mainz,3,1050,20,Rheinland-Pfalz,ungeprüfte Straßenangabe ohne Hausnummer
+RP-004,Testkunde RP 04,Schillerstraße,55116,Mainz,4,1600,25,Rheinland-Pfalz,ungeprüfte Straßenangabe ohne Hausnummer
+RP-005,Testkunde RP 05,Augustinerstraße,55116,Mainz,1,450,10,Rheinland-Pfalz,ungeprüfte Straßenangabe ohne Hausnummer
+RP-006,Testkunde RP 06,Rheinstraße,55116,Mainz,2,500,15,Rheinland-Pfalz,ungeprüfte Straßenangabe ohne Hausnummer
+RP-007,Testkunde RP 07,Quintinsstraße,55116,Mainz,3,900,20,Rheinland-Pfalz,ungeprüfte Straßenangabe ohne Hausnummer
+RP-008,Testkunde RP 08,Stadthausstraße,55116,Mainz,4,1400,25,Rheinland-Pfalz,ungeprüfte Straßenangabe ohne Hausnummer
+RP-009,Testkunde RP 09,Steingasse,55116,Mainz,1,400,10,Rheinland-Pfalz,ungeprüfte Straßenangabe ohne Hausnummer
+RP-010,Testkunde RP 10,Emmeransstraße,55116,Mainz,2,900,15,Rheinland-Pfalz,ungeprüfte Straßenangabe ohne Hausnummer
+SL-001,Testkunde SL 01,Bahnhofstraße,66111,Saarbrücken,1,250,10,Saarland,ungeprüfte Straßenangabe ohne Hausnummer
+SL-002,Testkunde SL 02,Reichsstraße,66111,Saarbrücken,2,600,15,Saarland,ungeprüfte Straßenangabe ohne Hausnummer
+SL-003,Testkunde SL 03,Kaiserstraße,66111,Saarbrücken,3,1050,20,Saarland,ungeprüfte Straßenangabe ohne Hausnummer
+SL-004,Testkunde SL 04,Viktoriastraße,66111,Saarbrücken,4,1600,25,Saarland,ungeprüfte Straßenangabe ohne Hausnummer
+SL-005,Testkunde SL 05,Dudweilerstraße,66111,Saarbrücken,1,450,10,Saarland,ungeprüfte Straßenangabe ohne Hausnummer
+SL-006,Testkunde SL 06,Sulzbachstraße,66111,Saarbrücken,2,500,15,Saarland,ungeprüfte Straßenangabe ohne Hausnummer
+SL-007,Testkunde SL 07,Futterstraße,66111,Saarbrücken,3,900,20,Saarland,ungeprüfte Straßenangabe ohne Hausnummer
+SL-008,Testkunde SL 08,Betzenstraße,66111,Saarbrücken,4,1400,25,Saarland,ungeprüfte Straßenangabe ohne Hausnummer
+SL-009,Testkunde SL 09,Gerberstraße,66111,Saarbrücken,1,400,10,Saarland,ungeprüfte Straßenangabe ohne Hausnummer
+SL-010,Testkunde SL 10,Berliner Promenade,66111,Saarbrücken,2,900,15,Saarland,ungeprüfte Straßenangabe ohne Hausnummer
+SN-001,Testkunde SN 01,Wilsdruffer Straße,01067,Dresden,1,250,10,Sachsen,ungeprüfte Straßenangabe ohne Hausnummer
+SN-002,Testkunde SN 02,Schloßstraße,01067,Dresden,2,600,15,Sachsen,ungeprüfte Straßenangabe ohne Hausnummer
+SN-003,Testkunde SN 03,Sophienstraße,01067,Dresden,3,1050,20,Sachsen,ungeprüfte Straßenangabe ohne Hausnummer
+SN-004,Testkunde SN 04,Ostra-Allee,01067,Dresden,4,1600,25,Sachsen,ungeprüfte Straßenangabe ohne Hausnummer
+SN-005,Testkunde SN 05,Devrientstraße,01067,Dresden,1,450,10,Sachsen,ungeprüfte Straßenangabe ohne Hausnummer
+SN-006,Testkunde SN 06,Schweriner Straße,01067,Dresden,2,500,15,Sachsen,ungeprüfte Straßenangabe ohne Hausnummer
+SN-007,Testkunde SN 07,Friedrichstraße,01067,Dresden,3,900,20,Sachsen,ungeprüfte Straßenangabe ohne Hausnummer
+SN-008,Testkunde SN 08,Schützengasse,01067,Dresden,4,1400,25,Sachsen,ungeprüfte Straßenangabe ohne Hausnummer
+SN-009,Testkunde SN 09,Hertha-Lindner-Straße,01067,Dresden,1,400,10,Sachsen,ungeprüfte Straßenangabe ohne Hausnummer
+SN-010,Testkunde SN 10,Kleine Brüdergasse,01067,Dresden,2,900,15,Sachsen,ungeprüfte Straßenangabe ohne Hausnummer
+ST-001,Testkunde ST 01,Breiter Weg,39104,Magdeburg,1,250,10,Sachsen-Anhalt,ungeprüfte Straßenangabe ohne Hausnummer
+ST-002,Testkunde ST 02,Ernst-Reuter-Allee,39104,Magdeburg,2,600,15,Sachsen-Anhalt,ungeprüfte Straßenangabe ohne Hausnummer
+ST-003,Testkunde ST 03,Otto-von-Guericke-Straße,39104,Magdeburg,3,1050,20,Sachsen-Anhalt,ungeprüfte Straßenangabe ohne Hausnummer
+ST-004,Testkunde ST 04,Hegelstraße,39104,Magdeburg,4,1600,25,Sachsen-Anhalt,ungeprüfte Straßenangabe ohne Hausnummer
+ST-005,Testkunde ST 05,Danzstraße,39104,Magdeburg,1,450,10,Sachsen-Anhalt,ungeprüfte Straßenangabe ohne Hausnummer
+ST-006,Testkunde ST 06,Leiterstraße,39104,Magdeburg,2,500,15,Sachsen-Anhalt,ungeprüfte Straßenangabe ohne Hausnummer
+ST-007,Testkunde ST 07,Goldschmiedebrücke,39104,Magdeburg,3,900,20,Sachsen-Anhalt,ungeprüfte Straßenangabe ohne Hausnummer
+ST-008,Testkunde ST 08,Jakobstraße,39104,Magdeburg,4,1400,25,Sachsen-Anhalt,ungeprüfte Straßenangabe ohne Hausnummer
+ST-009,Testkunde ST 09,Keplerstraße,39104,Magdeburg,1,400,10,Sachsen-Anhalt,ungeprüfte Straßenangabe ohne Hausnummer
+ST-010,Testkunde ST 10,Einsteinstraße,39104,Magdeburg,2,900,15,Sachsen-Anhalt,ungeprüfte Straßenangabe ohne Hausnummer
+SH-001,Testkunde SH 01,Holstenstraße,24103,Kiel,1,250,10,Schleswig-Holstein,ungeprüfte Straßenangabe ohne Hausnummer
+SH-002,Testkunde SH 02,Sophienblatt,24103,Kiel,2,600,15,Schleswig-Holstein,ungeprüfte Straßenangabe ohne Hausnummer
+SH-003,Testkunde SH 03,Andreas-Gayk-Straße,24103,Kiel,3,1050,20,Schleswig-Holstein,ungeprüfte Straßenangabe ohne Hausnummer
+SH-004,Testkunde SH 04,Ziegelteich,24103,Kiel,4,1600,25,Schleswig-Holstein,ungeprüfte Straßenangabe ohne Hausnummer
+SH-005,Testkunde SH 05,Walkerdamm,24103,Kiel,1,450,10,Schleswig-Holstein,ungeprüfte Straßenangabe ohne Hausnummer
+SH-006,Testkunde SH 06,Fleethörn,24103,Kiel,2,500,15,Schleswig-Holstein,ungeprüfte Straßenangabe ohne Hausnummer
+SH-007,Testkunde SH 07,Kehdenstraße,24103,Kiel,3,900,20,Schleswig-Holstein,ungeprüfte Straßenangabe ohne Hausnummer
+SH-008,Testkunde SH 08,Dänische Straße,24103,Kiel,4,1400,25,Schleswig-Holstein,ungeprüfte Straßenangabe ohne Hausnummer
+SH-009,Testkunde SH 09,Schloßstraße,24103,Kiel,1,400,10,Schleswig-Holstein,ungeprüfte Straßenangabe ohne Hausnummer
+SH-010,Testkunde SH 10,Küterstraße,24103,Kiel,2,900,15,Schleswig-Holstein,ungeprüfte Straßenangabe ohne Hausnummer
+TH-001,Testkunde TH 01,Anger,99084,Erfurt,1,250,10,Thüringen,ungeprüfte Straßenangabe ohne Hausnummer
+TH-002,Testkunde TH 02,Bahnhofstraße,99084,Erfurt,2,600,15,Thüringen,ungeprüfte Straßenangabe ohne Hausnummer
+TH-003,Testkunde TH 03,Schlösserstraße,99084,Erfurt,3,1050,20,Thüringen,ungeprüfte Straßenangabe ohne Hausnummer
+TH-004,Testkunde TH 04,Marktstraße,99084,Erfurt,4,1600,25,Thüringen,ungeprüfte Straßenangabe ohne Hausnummer
+TH-005,Testkunde TH 05,Lange Brücke,99084,Erfurt,1,450,10,Thüringen,ungeprüfte Straßenangabe ohne Hausnummer
+TH-006,Testkunde TH 06,Michaelisstraße,99084,Erfurt,2,500,15,Thüringen,ungeprüfte Straßenangabe ohne Hausnummer
+TH-007,Testkunde TH 07,Johannesstraße,99084,Erfurt,3,900,20,Thüringen,ungeprüfte Straßenangabe ohne Hausnummer
+TH-008,Testkunde TH 08,Juri-Gagarin-Ring,99084,Erfurt,4,1400,25,Thüringen,ungeprüfte Straßenangabe ohne Hausnummer
+TH-009,Testkunde TH 09,Neuwerkstraße,99084,Erfurt,1,400,10,Thüringen,ungeprüfte Straßenangabe ohne Hausnummer
+TH-010,Testkunde TH 10,Regierungsstraße,99084,Erfurt,2,900,15,Thüringen,ungeprüfte Straßenangabe ohne Hausnummer

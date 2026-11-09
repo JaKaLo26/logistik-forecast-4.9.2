@@ -3,7 +3,7 @@
 Das vortrainierte Modell `models/builtin_forecast.joblib` wird beim App-Start
 geladen. Kein Training, Upload oder manuelles Aktivieren in der Oberfläche.
 Die bisherige vierte Seite entfällt. Training bleibt ein separater Offline-Schritt:
-`python scripts/train_builtin_model.py` (Skriptversion 1.0).
+`python scripts/train_builtin_model.py` (aktuelle Skriptversion 2.0).
 
 Seite 2: Depot und Startzeit angeben. Die gerichtete OSRM-Matrix liefert
 Basiszeiten und Distanzen. Das Modell prognostiziert daraus die Fahrzeiten
@@ -23,8 +23,9 @@ Bei geänderter Startzeit werden Tourgruppen und Forecast verworfen.
 
 ## Modell und Reproduzierbarkeit
 
-Random Forest, 100 Bäume, feste Parameter und Seed 42. 100 synthetische Touren
-mit je 5 Aufträgen; Zeitlabels ausdrücklich synthetisch. Vollständige Touren
+Random Forest, 100 Bäume, feste Parameter und Seed 42. Aktuell 1.000 synthetische
+Touren mit insgesamt 8.000 Stopps, genau 500 je Bundesland; Zeitlabels ausdrücklich
+synthetisch. Vollständige Touren
 für Training, Validierung und Test getrennt. Generator 1.0, Parameter,
 Datensatzhash, Modellparameter, Bibliotheksversion, Split-IDs und Testmetriken:
 `models/builtin_report.json`. Rohaufträge, Segmente und Testprognosen liegen
@@ -36,6 +37,14 @@ Trainingsbasis ist vollständig offline synthetisch: zufällige Segmentdistanzen
 2–25 km und angenommene Basisgeschwindigkeit 45 km/h. Kein Straßen-/LKW-
 Genauigkeitsnachweis und keine belastbare Extrapolation außerhalb dieses
 Szenarios. Der Wuppertal-Datensatz und TomTom werden nicht fürs Training benutzt.
+Die Datei `data/training_stops_de.csv` enthält zehn ungeprüfte Straßenangaben ohne
+Hausnummer je Bundesland. Diese Angaben werden nicht geocodiert. Das Modell sieht
+keine Region als Feature; die Segmentdistanz wird unabhängig vom Ort gezogen.
+Die gleichmäßige Verteilung und der separate Test mit zwei ungesehenen Bundesländern
+belegen daher keine deutschlandweite Genauigkeit auf realen Straßen. Der Bericht
+enthält die synthetischen Testfehler nach Land und Distanzband sowie den Abstand
+zwischen Trainings- und Testfehler. Für einen belastbaren Straßennachweis wären
+geprüfte Koordinaten, echte Routing-Basiszeiten und unabhängige Zielzeiten nötig.
 
 ## Änderungen und Prüfungen
 
