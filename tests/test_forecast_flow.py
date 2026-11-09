@@ -73,8 +73,10 @@ def test_segment_to_tour_eta_and_display_share_seconds(monkeypatch, available):
     first = parts[0]
     duration = round(333.1*60) if available else 15720
     assert first['model_forecast_s'] == duration
-    assert datetime.fromisoformat(first['arrival_time_forecast']) == start + timedelta(seconds=duration)
-    assert datetime.fromisoformat(parts[1]['departure_time']) == start + timedelta(seconds=duration+720)
+    drive_break = 45 * 60 if available else 0
+    assert first["break_during_drive_s"] == drive_break
+    assert datetime.fromisoformat(first['arrival_time_forecast']) == start + timedelta(seconds=duration+drive_break)
+    assert datetime.fromisoformat(parts[1]['departure_time']) == start + timedelta(seconds=duration+drive_break+720)
     assert tour['model_forecast_s'] == sum(p['model_forecast_s'] for p in parts)
     rows = forecast.segment_rows(tour)
     assert rows[0]['forecast_min'] == round(duration/60)

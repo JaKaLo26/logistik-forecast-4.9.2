@@ -39,7 +39,7 @@ class Geocoder:
         self.last_nominatim_request = 0.0
         self.last_errors: list[str] = []
 
-    def search(self, address: str, limit: int = 5) -> list[dict]:
+    def search(self, address: str, limit: int = 5, *, fast: bool = False) -> list[dict]:
         """Sucht bei beiden Providern und liefert kompatible Treffer zurück.
 
         Bei null Treffern werden wenige, kontrollierte Schreibvarianten versucht.
@@ -66,6 +66,8 @@ class Geocoder:
                     for hit in hits:
                         hit["query"] = query
                     all_hits.extend(hits)
+                    if fast and any(hit.get("confidence", 0) >= 0.72 for hit in hits):
+                        break
                 except (
                     requests.exceptions.RequestException,
                     ValueError,
@@ -198,8 +200,8 @@ class Geocoder:
 
     def _nominatim(self, address: str, limit: int) -> list[dict]:
         elapsed = time.monotonic() - self.last_nominatim_request
-        if elapsed < 1.1:
-            time.sleep(1.1 - elapsed)
+        if elapsed < 1.0:
+            time.sleep(1.0 - elapsed)
 
         params = {
             "q": address,
@@ -211,14 +213,12 @@ class Geocoder:
         if self.contact_email:
             params["email"] = self.contact_email
 
-        try:
-            response = self.session.get(
-                f"{self.nominatim_base_url}/search",
-                params=params,
-                timeout=self.timeout,
-            )
-        finally:
-            self.last_nominatim_request = time.monotonic()
+        self.last_nominatim_request = time.monotonic()
+        response = self.session.get(
+            f"{self.nominatim_base_url}/search",
+            params=params,
+            timeout=self.timeout,
+        )
 
         response.raise_for_status()
         payload = response.json()

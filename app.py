@@ -3,30 +3,36 @@
 
 from __future__ import annotations
 
+from html import escape
 import hashlib
 import json
+import math
 import os
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from io import StringIO
 
 import gradio as gr
 import pandas as pd
 import spaces
+from uuid import uuid4
+from src.driver_planning import driver_fleet, DRIVER_COLUMNS
+from src.builtin_model import load_builtin_model, predict_road_matrix
+from src.ml_training import predict_seconds
 from dotenv import load_dotenv
 
 load_dotenv()
 
 from src.capacity import normalize_orders, summarize_orders
-from src.clustering import cluster_orders
+from src.clustering import cluster_orders, DRIVER_DEFAULTS, plan_day, road_matrix
 from src.geocoding import Geocoder
 from src.routing import OSRMRouter
 from src.maps import build_map
 from src.forecast import (
     calculate_tour_forecast,
-    recalculate_tour_from_stop,
-    segment_rows,
-    tour_summary,
 )
+from src.tour_progress import loading_plan
 from src.training_logger import log_forecast, training_logger_status
 
 TIMEOUT = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "20"))
@@ -54,7 +60,7 @@ LARGE = {"class": "40 t", "pallet_capacity": 33, "payload_kg": 24000}
 def _read_json(payload: str) -> pd.DataFrame:
     if not payload or str(payload).strip() in {"", "[]", "null"}:
         return pd.DataFrame()
-    return pd.read_json(StringIO(payload), orient="records")
+    return pd.read_json(StringIO(payload), orient="records", dtype=False)
 
 
 def _json_load(payload, default):
@@ -143,6 +149,7 @@ def make_fleet(n_small=3, n_large=3):
             **SMALL,
             "color": COLORS[idx % len(COLORS)],
             "available": True,
+            **DRIVER_DEFAULTS,
         })
         idx += 1
 
@@ -152,6 +159,7 @@ def make_fleet(n_small=3, n_large=3):
             **LARGE,
             "color": COLORS[idx % len(COLORS)],
             "available": True,
+            **DRIVER_DEFAULTS,
         })
         idx += 1
 
@@ -161,10 +169,10 @@ def make_fleet(n_small=3, n_large=3):
 def update_fleet(n_small, n_large):
     df = make_fleet(max(0, int(n_small or 0)), max(0, int(n_large or 0)))
     if df.empty:
-        return df, "⚠️ Keine Fahrzeuge konfiguriert."
+        return [], "⚠️ Noch keine Touren geplant."
 
     return (
-        df,
+        df.to_dict("records"),
         f"**{len(df)} Fahrzeuge · {int(df.pallet_capacity.sum())} "
         f"Palettenplätze · {int(df.payload_kg.sum()):,} kg Nutzlast**",
     )
@@ -197,9 +205,9 @@ def read_csv(file):
 
     try:
         try:
-            df = pd.read_csv(file, sep=None, engine="python", encoding="utf-8-sig")
+            df = pd.read_csv(file, sep=None, engine="python", encoding="utf-8-sig", dtype=str)
         except UnicodeDecodeError:
-            df = pd.read_csv(file, sep=None, engine="python", encoding="cp1252")
+            df = pd.read_csv(file, sep=None, engine="python", encoding="cp1252", dtype=str)
 
         if df.empty:
             raise gr.Error("CSV ist leer.")
@@ -229,13 +237,32 @@ def geocode_all(orders_json):
     geocoder = Geocoder(TIMEOUT)
     full_rows = []
     candidates = {}
+    failures = 0
 
+    yield (
+        pd.DataFrame(columns=["auftrag", "kunde", "adresse", "status", "treffer", "sicherheit"]),
+        "[]",
+        "{}",
+        f"**Adressprüfung gestartet: 0 / {len(orders)} Adressen.** Die Adressdienste werden abgefragt.",
+    )
+
+    next_lookup = 0.0
     for _, row in orders.iterrows():
+        delay = next_lookup - time.monotonic()
+        if delay > 0:
+            time.sleep(delay)
+        next_lookup = time.monotonic() + 1.0
         oid = str(row["auftrag"])
-        hits = _prepare_candidates(
-            oid,
-            geocoder.search(row["adresse"], 5),
-        )
+        error = ""
+        try:
+            hits = _prepare_candidates(
+                oid,
+                geocoder.search(row["adresse"], 5, fast=True),
+            )
+        except (RuntimeError, ValueError, TypeError, KeyError) as exc:
+            hits = []
+            error = str(exc)
+            failures += 1
         candidates[oid] = hits
         best = hits[0] if hits else None
 
@@ -256,16 +283,22 @@ def geocode_all(orders_json):
             "lat": best.get("lat") if best else None,
             "lon": best.get("lon") if best else None,
             "provider": best.get("provider", "") if best else "",
+            "geocoding_error": error,
         })
 
-    full = pd.DataFrame(full_rows)
-
-    return (
-        address_visible(full),
-        full.to_json(orient="records", force_ascii=False),
-        json.dumps(candidates, ensure_ascii=False),
-        address_status(full),
-    )
+        full = pd.DataFrame(full_rows)
+        progress = f"**{len(full_rows)} / {len(orders)} Adressen bearbeitet.** "
+        if failures:
+            progress += (
+                f"⚠️ Adressdienst bei {failures} Adresse(n) fehlgeschlagen. "
+                "Diese Adressen bitte unten einzeln erneut suchen. "
+            )
+        yield (
+            address_visible(full),
+            full.to_json(orient="records", force_ascii=False),
+            json.dumps(candidates, ensure_ascii=False),
+            progress + address_status(full),
+        )
 
 
 def address_visible(full):
@@ -292,7 +325,7 @@ def address_status(full):
     open_count = int((full["status"] == "MANUELL PRÜFEN").sum())
     return (
         f"**{len(full)} Adressen geprüft · "
-        f"✅ {len(full) - open_count} automatisch/bestätigt · "
+        f"✅ {len(full) - open_count} bestätigt · "
         f"⚠️ {open_count} offen**"
     )
 
@@ -401,7 +434,7 @@ def search_review_address(
         message,
         gr.update(
             choices=choices,
-            value=choices[0][1] if choices else None,
+            value=None,
             interactive=bool(choices),
         ),
         status,
@@ -470,7 +503,7 @@ def confirm_review(address_state_json, candidates_json, oid, hits_json, selected
         info = f"### Jetzt prüfen\n**{next_row['kunde']}**  \n{next_row['eingabe']}"
         choice = gr.update(
             choices=choices,
-            value=choices[0][1] if choices else None,
+            value=None,
             interactive=bool(choices),
         )
 
@@ -494,7 +527,7 @@ def save_addresses(address_state_json, orders_json):
     if full.empty:
         raise gr.Error("Keine Adressprüfung vorhanden.")
 
-    if (full["status"] == "MANUELL PRÜFEN").any():
+    if not full["status"].isin(["OK", "MANUELL BESTÄTIGT"]).all():
         raise gr.Error("Es sind noch Adressen offen.")
 
     merged = orders.merge(
@@ -558,31 +591,90 @@ def confirm_depot(input_address, hits_json, selected):
     )
 
 
-def create_clusters(geo_json, vehicle_table, depot_json):
+def create_clusters(geo_json, depot_json, start_date, start_time, ml_bundle, driver_rows=None):
     orders = _read_json(geo_json)
-    vehicles = pd.DataFrame(vehicle_table)
-
     if orders.empty:
         raise gr.Error("Adressprüfung zuerst abschließen.")
-    if vehicles.empty:
-        raise gr.Error("Keine Fahrzeuge.")
     if not depot_json:
         raise gr.Error("Depot zuerst bestätigen.")
 
     depot = _json_load(depot_json, {})
     depot_coord = (float(depot["lat"]), float(depot["lon"]))
 
+    if ml_bundle is None:
+        raise gr.Error("Das eingebaute KI-Modell konnte nicht geladen werden.")
+    departure = normalize_start_time(start_date, start_time)
+    coords = [depot_coord] + [(float(row.lat), float(row.lon)) for row in orders.itertuples()]
+    baseline, distances = road_matrix(coords, include_distances=True)
+    predicted = predict_road_matrix(baseline, distances, departure, ml_bundle)
+    vehicles = make_fleet(0, len(orders))
+    if driver_rows is not None:
+        profile = pd.DataFrame(driver_rows, columns=DRIVER_COLUMNS)
+        if len(profile) != 1:
+            raise gr.Error("Bitte genau ein gemeinsames Fahrerzeitprofil angeben.")
+        driver_rows = pd.DataFrame([
+            {**profile.iloc[0].to_dict(), "driver_id": f"FAHRER-{i + 1:02d}"}
+            for i in range(len(orders))
+        ], columns=DRIVER_COLUMNS)
+    if driver_rows is not None:
+        try:
+            vehicles = driver_fleet(vehicles, driver_rows)
+        except Exception as exc:
+            raise gr.Error(str(exc))
     assignments, summary, warnings = cluster_orders(
         orders,
         vehicles,
-        depot_coord
+        depot_coord, durations=predicted
     )
 
-    msg = (
-        "✅ Geografische Cluster erstellt. "
-        "Jeder LKW erhält ein möglichst zusammenhängendes Liefergebiet."
-    )
+    planned_fleet = []
+    small_index = large_index = 0
+    for row in summary.to_dict("records"):
+        fits_small = (row["paletten"] <= SMALL["pallet_capacity"]
+                      and row["gewicht_kg"] <= SMALL["payload_kg"])
+        if fits_small:
+            small_index += 1
+            vehicle_id, spec = f"LKW-K{small_index:02d}", SMALL
+        else:
+            large_index += 1
+            vehicle_id, spec = f"LKW-G{large_index:02d}", LARGE
+        source_driver = vehicles[vehicles.vehicle_id == row["vehicle_id"]].iloc[0]
+        planned_fleet.append({
+            "vehicle_id": vehicle_id, **spec, "available": True,
+            "color": COLORS[len(planned_fleet) % len(COLORS)],
+            **{key: source_driver[key] for key in DRIVER_DEFAULTS},
+            "driver_id": source_driver.get("driver_id", "Demofahrer"),
+            "planned_break_min": row["pausen_min"],
+            "planned_tour_min": row["tourdauer_min"],
+        })
+    if planned_fleet:
+        id_map = dict(zip(summary["vehicle_id"], (v["vehicle_id"] for v in planned_fleet)))
+        assignments["vehicle_id"] = assignments["vehicle_id"].replace(id_map)
+        summary["vehicle_id"] = summary["vehicle_id"].map(id_map)
+        for key, load, capacity in (
+            ("paletten_auslastung_pct", "paletten", "pallet_capacity"),
+            ("gewicht_auslastung_pct", "gewicht_kg", "payload_kg"),
+        ):
+            summary[key] = [round(100 * amount / v[capacity], 1)
+                            for amount, v in zip(summary[load], planned_fleet)]
 
+    unassigned = assignments["vehicle_id"].eq("NICHT ZUGEWIESEN")
+    if unassigned.any():
+        count = int(unassigned.sum())
+        msg = (
+            f"❌ **Fehler: {count} von {len(orders)} Aufträgen konnten keinem Lkw "
+            "zugewiesen werden.** Die konkreten Gründe stehen je Auftrag in der Tabelle. "
+            "Die Routenoptimierung ist erst bei vollständiger Zuordnung möglich."
+        )
+        reasons = assignments.loc[unassigned, "zuordnungsgrund"].value_counts()
+        msg += "\n\n" + "\n".join(f"- {n} Auftrag/Aufträge: {reason}" for reason, n in reasons.items())
+    else:
+        msg = (
+            f"✅ Benötigt: {len(planned_fleet)} Fahrer und {len(planned_fleet)} Lkw eingeplant ({small_index} × 14 t, {large_index} × 40 t). "
+            "Fahrzeit, Service, Pausen und Rückweg wurden mit den eingetragenen Fahrerbudgets eingeplant."
+        )
+
+    warnings.insert(0, "Modell-Fahrzeiten innerhalb des Trainingsbereichs, sonst OSRM-Ersatzwerte; synthetischer Machbarkeitsnachweis. Abfahrtszeitänderungen erfordern neue Tourgruppen.")
     if warnings:
         msg += "\n\n⚠️ " + " | ".join(warnings)
 
@@ -595,23 +687,26 @@ def create_clusters(geo_json, vehicle_table, depot_json):
             "adresse",
             "paletten",
             "gesamtgewicht_kg",
+            "zuordnungsgrund",
         ]
     ].copy()
 
     return (
         visible,
         summary,
-        assignments.to_json(orient="records", force_ascii=False),
+        "[]" if unassigned.any() else assignments.to_json(orient="records", force_ascii=False),
         msg,
+        "[]",
+        planned_fleet if not unassigned.any() else [],
     )
 
 
-def optimize_routes(cluster_json, vehicle_table, depot_json):
+def optimize_routes(cluster_json, vehicle_table, depot_json, start_date, start_time, ml_bundle):
     clustered = _read_json(cluster_json)
     vehicles = pd.DataFrame(vehicle_table)
 
-    if clustered.empty:
-        raise gr.Error("Zuerst Cluster bilden.")
+    if clustered.empty or clustered["vehicle_id"].eq("NICHT ZUGEWIESEN").any():
+        raise gr.Error("Zuerst alle Aufträge einem Lkw zuweisen.")
 
     depot = _json_load(depot_json, {})
     depot_coord = (float(depot["lat"]), float(depot["lon"]))
@@ -637,7 +732,23 @@ def optimize_routes(cluster_json, vehicle_table, depot_json):
         stops = [row.to_dict() for _, row in group.iterrows()]
 
         try:
-            result = router.optimize_roundtrip(depot_coord, stops)
+            stops = sorted(stops, key=lambda stop: stop.get("cluster_sequence", 0))
+            result = router.route([depot_coord] + [(float(s["lat"]), float(s["lon"])) for s in stops] + [depot_coord])
+            result["ordered_stops"] = stops
+            result["optimizer"] = "ai-time-feasible-insertion"
+            if len(result.get("legs", [])) != len(stops) + 1:
+                raise ValueError("Unvollständige Fahrzeitdaten für Zeitprüfung.")
+            departure = datetime.fromisoformat(normalize_start_time(start_date, start_time))
+            model_legs = []
+            for index, leg in enumerate(result["legs"]):
+                seconds = predict_seconds(ml_bundle, leg['duration'], leg['distance'], departure.isoformat())
+                model_legs.append(seconds / 60)
+                service = float(stops[index].get('service_min', 0)) * 60 if index < len(stops) else 0
+                departure += timedelta(seconds=seconds + service)
+            driver_plan = plan_day(model_legs,
+                                   [float(s.get("service_min", 0)) for s in stops], vehicle_row)
+            if not driver_plan["feasible"]:
+                raise ValueError("KI-Prognose der Straßenroute überschreitet das Fahrerbudget. Tourgruppen erneut bilden.")
         except Exception as exc:
             debug.append({"vehicle_id": vid, "error": str(exc)})
             continue
@@ -650,6 +761,7 @@ def optimize_routes(cluster_json, vehicle_table, depot_json):
                 "vehicle_id": vid,
                 "cluster_id": stop.get("cluster_id", ""),
                 "stopp_nr": seq,
+                "ladereihenfolge": len(ordered) - seq + 1,
                 "auftrag": stop.get("auftrag", ""),
                 "kunde": stop.get("kunde", ""),
                 "adresse": stop.get("adresse", ""),
@@ -674,6 +786,7 @@ def optimize_routes(cluster_json, vehicle_table, depot_json):
                     "lon": float(stop["lon"]),
                     "paletten": int(stop.get("paletten", 0)),
                     "gesamtgewicht_kg": int(stop.get("gesamtgewicht_kg", 0)),
+                    "warengewicht_kg": float(stop.get("warengewicht_kg", 0)),
                     "service_min": float(stop.get("service_min", 0)),
                 }
                 for stop in ordered
@@ -681,6 +794,7 @@ def optimize_routes(cluster_json, vehicle_table, depot_json):
             "distance_m": float(result["distance_m"]),
             "duration_s": float(result["duration_s"]),
             "optimizer": result.get("optimizer", "osrm-trip"),
+            "driver_plan": driver_plan,
         })
 
         debug.append({
@@ -695,17 +809,18 @@ def optimize_routes(cluster_json, vehicle_table, depot_json):
     if not routes:
         raise gr.Error("Keine Route konnte optimiert werden.")
 
-    choices = ["Alle Touren"] + [route["vehicle_id"] for route in routes]
+    choices = [route["vehicle_id"] for route in routes]
 
     return (
         pd.DataFrame(route_rows),
-        gr.update(choices=choices, value="Alle Touren", interactive=True),
-        build_map(routes, depot),
+        gr.update(choices=choices, value=choices[0], interactive=True),
+        build_map(routes[:1], depot),
         json.dumps(routes, ensure_ascii=False),
         json.dumps(debug, ensure_ascii=False, indent=2, default=str),
         (
-            "✅ Stoppreihenfolge mit OSRM optimiert. "
-            "Als Nächstes kann der segmentweise TomTom-Forecast berechnet werden."
+            "✅ Straßenroute und Fahrerbudget geprüft; Cluster-Reihenfolge beibehalten. "
+            "Pausen sind Zeitreserven ohne geprüfte Parkplätze. Forecast-Ankünfte enthalten diese Pausen noch nicht. "
+
         ),
     )
 
@@ -724,36 +839,75 @@ def render_route(routes_json, selected, depot_json):
     return build_map(routes, depot)
 
 
-def normalize_start_time(value):
-    text = str(value or "").strip()
+TOUR_TIMEZONE = ZoneInfo("Europe/Berlin")
 
-    if not text:
-        return (
-            datetime.now()
-            .astimezone()
-            .replace(second=0, microsecond=0)
-            .isoformat()
-        )
 
-    try:
-        parsed = datetime.fromisoformat(text)
-    except Exception:
-        raise gr.Error(
-            "Startzeit bitte im ISO-Format eingeben, "
-            "z. B. 2026-08-20T07:00:00+02:00"
-        )
+def current_tour_date():
+    return datetime.now(TOUR_TIMEZONE).strftime("%d.%m.%y")
 
-    if parsed.tzinfo is None:
-        parsed = parsed.astimezone()
 
-    return parsed.replace(second=0, microsecond=0).isoformat()
+def normalize_start_time(date, time):
+    date = (date or "").strip() or current_tour_date()
+    time = (time or "").strip()
+    if not time:
+        raise gr.Error("Bitte eine Startzeit eingeben, z. B. 07:00.")
+    for date_format in ("%d.%m.%y", "%d.%m.%Y"):
+        try:
+            parsed = datetime.strptime(f"{date} {time}", f"{date_format} %H:%M")
+            return parsed.replace(tzinfo=TOUR_TIMEZONE).isoformat()
+        except ValueError:
+            continue
+    raise gr.Error("Bitte Datum und Uhrzeit wie 03.11.26 und 07:00 eingeben.")
+
+
+def render_forecast_card(vehicle_id, driver_status, segments, expanded=False):
+    def minutes(value):
+        return f"{value / 60:.0f} min" if value is not None else "nicht verfügbar"
+
+    fields = (
+        ("OSRM", "osrm_baseline_s"),
+        ("TomTom Live-Prognose", "tomtom_live_s"),
+        ("TomTom historisch", "tomtom_historic_s"),
+        ("Verwendeter Forecast", "model_forecast_s"),
+    )
+    opening = " open" if expanded else ""
+    parts = [
+        f'<details{opening} style="padding:12px;border:1px solid #64748b;border-radius:12px;margin-bottom:8px">',
+        f"<summary><strong>Lkw {escape(str(vehicle_id))}</strong> · {escape(driver_status)}</summary>",
+    ]
+    for index, segment in enumerate(segments, 1):
+        origin = "Depot" if index == 1 else f"Stopp {index - 1}"
+        destination = "Depot" if segment["to_stop_id"] == "DEPOT" else f"Stopp {index}"
+        name = escape(str(segment.get("to_stop_name") or destination))
+        predicted = minutes(segment.get("model_forecast_s"))
+        parts.append(f'<details style="padding:8px;margin-left:8px"><summary>{origin} → {destination} · {name} · Forecast {predicted}</summary>')
+        parts.append('<div style="display:flex;flex-wrap:wrap;gap:12px;padding:8px">')
+        for label, key in fields:
+            value = segment.get(key)
+            if key.startswith("tomtom_") and (not segment.get("tomtom_success") or not value):
+                value = None
+            parts.append(f"<span>{label}: <strong>{minutes(value)}</strong></span>")
+        if destination != "Depot":
+            parts.append(f"<span>Service am Ziel: <strong>{minutes(segment.get('planned_service_s'))}</strong></span>")
+        if segment.get("planned_break_s"):
+            parts.append(f"<p>Geplante Fahrt-/Arbeitsunterbrechung: <strong>{minutes(segment['planned_break_s'])}</strong>. In Ankunft bzw. Folgeabfahrt berücksichtigt. Pausenort noch zu prüfen.</p>")
+        if segment.get("arrival_time_forecast"):
+            parts.append(f"<p>Ankunft inklusive Fahrtunterbrechungen: {escape(str(segment['arrival_time_forecast']))}</p>")
+        if segment.get("forecast_warning"):
+            note = f"{segment['forecast_warning']} Verwendet: {segment.get('forecast_source', 'Referenz')}."
+            parts.append(f"<p>{escape(note)}</p>")
+        parts.append("</div></details>")
+    parts.append("</details>")
+    return "".join(parts)
 
 
 def calculate_all_forecasts(
     routes_json,
     depot_json,
     vehicle_table,
-    start_time
+    start_date,
+    start_time,
+    ml_bundle=None
 ):
     routes = _json_load(routes_json, [])
     depot = _json_load(depot_json, {})
@@ -763,21 +917,19 @@ def calculate_all_forecasts(
         raise gr.Error("Zuerst Routen optimieren.")
     if not depot:
         raise gr.Error("Depot fehlt.")
-    if not TOMTOM_API_KEY:
-        raise gr.Error("TOMTOM_API_KEY fehlt im Hugging-Face-Space.")
+    if ml_bundle is None:
+        raise gr.Error("Bitte zuerst ein KI-Modell trainieren oder laden.")
 
-    normalized_start = normalize_start_time(start_time)
+    normalized_start = normalize_start_time(start_date, start_time)
 
     forecasts = {}
-    summary_rows = []
-    segment_table_rows = []
+    tour_cards = {}
+    deviations = []
     debug = []
     logging_results = []
-    vehicle_choices = []
 
     for route in routes:
         vehicle_id = str(route["vehicle_id"])
-        vehicle_choices.append(vehicle_id)
 
         vehicle_rows = vehicles[
             vehicles["vehicle_id"].astype(str) == vehicle_id
@@ -789,21 +941,23 @@ def calculate_all_forecasts(
             else vehicle_parameters(vehicle_rows.iloc[0])
         )
 
-        tour_id = (
-            f"{datetime.now().strftime('%Y%m%d%H%M%S')}"
-            f"-{vehicle_id}"
-        )
+        tour_id = str(uuid4())
 
         try:
             forecast = calculate_tour_forecast(
                 route=route,
                 depot=depot,
                 start_time=normalized_start,
+                ml_bundle=ml_bundle,
                 api_key=TOMTOM_API_KEY,
                 timeout=TIMEOUT,
                 tour_id=tour_id,
                 forecast_version=1,
                 vehicle_parameters=params,
+                driver_profile={} if vehicle_rows.empty else {
+                    key: float(vehicle_rows.iloc[0].get(key, value))
+                    for key, value in DRIVER_DEFAULTS.items()
+                },
             )
         except Exception as exc:
             debug.append({
@@ -814,12 +968,57 @@ def calculate_all_forecasts(
             continue
 
         forecasts[vehicle_id] = forecast
-        summary_rows.append(tour_summary(forecast))
+        segments = forecast["segments"]
+        limits = ("remaining_drive_min", "remaining_week_drive_min",
+                  "remaining_fortnight_drive_min")
+        missing_live = [
+            f"{segment.get('from_stop_name', 'Start')} → {segment.get('to_stop_name', 'Ziel')} "
+            f"({segment.get('tomtom_error') or 'kein gültiger Live-Wert'})"
+            for segment in segments
+            if not (
+                segment.get("tomtom_success")
+                and isinstance(segment.get("tomtom_live_s"), (int, float))
+                and math.isfinite(segment["tomtom_live_s"])
+                and segment["tomtom_live_s"] > 0
+            )
+        ]
+        live_available = bool(segments) and not missing_live
+        if live_available:
+            live_seconds = sum(segment["tomtom_live_s"] for segment in segments)
+            forecast_seconds = sum(segment["model_forecast_s"] for segment in segments)
+            driving = live_seconds / 60
+            delta = round((forecast_seconds - live_seconds) / 60)
+            difference = f"Abweichung eigener Forecast zu TTLive: {delta:+d} min" if delta else "Abweichung eigener Forecast zu TTLive: 0 min"
+        else:
+            difference = "Abweichung nicht verfügbar (TTLive unvollständig)."
 
-        for row in segment_rows(forecast):
-            row["vehicle_id"] = vehicle_id
-            row["forecast_version"] = forecast.get("forecast_version")
-            segment_table_rows.append(row)
+        if vehicle_rows.empty:
+            driver_status = "Fahrerbudget fehlt."
+        else:
+            driver = vehicle_rows.iloc[0]
+            budgets = [float(driver.get(key, DRIVER_DEFAULTS[key])) for key in limits]
+            budget = min(540, *budgets) if all(math.isfinite(v) and v >= 0 for v in budgets) else None
+            if budget is None:
+                driver_status = "Fahrerbudget ungültig."
+            elif not live_available:
+                ai_drive = sum(segment["model_forecast_s"] for segment in segments) / 60
+                driver_status = f"Forecast-Fahrzeit: {ai_drive:.0f} von {budget:.0f} min Fahrerbudget. TomTom-Livevergleich nicht für alle Teilstrecken verfügbar."
+            elif driving > budget:
+                driver_status = (
+                    f"⛔ Lenkzeitbudget um {math.ceil(driving - budget)} min überschritten. "
+                    f"TTLive: {driving:.0f} von {budget:.0f} min inklusive Rückfahrt. Tour neu planen."
+                )
+            else:
+                driver_status = (
+                    f"{budget - driving:.0f} min Restlenkzeit "
+                    f"nach der Tour (TTLive: {driving:.0f} von {budget:.0f} min inklusive Rückfahrt)."
+                )
+
+        driver_status += f" Geplante Pausen: {forecast.get('planned_break_s', 0) / 60:.0f} min."
+        if not forecast.get("driver_time_plan", {}).get("feasible", True):
+            driver_status += " ⛔ Forecast überschreitet Fahrerzeitbudget einschließlich Arbeit/Pausen. Tour neu planen."
+        deviations.append(f"- **{vehicle_id}** · {difference}")
+        tour_cards[vehicle_id] = render_forecast_card(vehicle_id, driver_status, segments, expanded=True)
 
         try:
             log_result = log_forecast(forecast)
@@ -841,16 +1040,7 @@ def calculate_all_forecasts(
         })
 
     if not forecasts:
-        raise gr.Error("Kein Forecast konnte berechnet werden.")
-
-    summary_df = pd.DataFrame(summary_rows)
-    segments_df = pd.DataFrame(segment_table_rows)
-    markdown = build_forecast_markdown(summary_df)
-
-    first_vehicle = vehicle_choices[0] if vehicle_choices else None
-    stop_choices = forecast_stop_choices(
-        forecasts.get(first_vehicle, {})
-    )
+        raise gr.Error("KI-Forecast fehlgeschlagen: " + "; ".join(str(item.get("error", "Unbekannter Fehler")) for item in debug))
 
     combined_debug = {
         "forecast": debug,
@@ -859,223 +1049,10 @@ def calculate_all_forecasts(
     }
 
     return (
-        summary_df,
-        segments_df,
-        markdown,
-        json.dumps(forecasts, ensure_ascii=False, default=str),
+        tour_cards,
+        "\n".join(deviations),
         json.dumps(combined_debug, ensure_ascii=False, indent=2, default=str),
-        gr.update(
-            choices=vehicle_choices,
-            value=first_vehicle,
-            interactive=bool(vehicle_choices)
-        ),
-        gr.update(
-            choices=stop_choices,
-            value=stop_choices[0] if stop_choices else None,
-            interactive=bool(stop_choices)
-        ),
-        "✅ Segment-Forecast berechnet und Trainingslogger ausgeführt.",
-    )
-
-
-def build_forecast_markdown(summary_df):
-    if summary_df is None or summary_df.empty:
-        return "Noch kein Forecast vorhanden."
-
-    lines = [
-        "## Dynamischer Tour-Forecast 4.9.5",
-        "",
-        (
-            "Die Fahrzeit wird **zwischen jedem Stopp separat** berechnet. "
-            "Servicezeiten verschieben die Abfahrtszeit des nächsten Segments."
-        ),
-        "",
-    ]
-
-    def duration_text(value):
-        return "nicht verfügbar / unvollständig" if pd.isna(value) else f"{value} min"
-
-    for _, row in summary_df.iterrows():
-        ist_value = row.get("ist_fahrzeit_min")
-        ist_text = "noch offen" if pd.isna(ist_value) else f"{ist_value} min"
-
-        lines += [
-            f"### 🚚 {row['vehicle_id']} · Forecast V{row['forecast_version']}",
-            f"- Stopps: **{row['stopps']}**",
-            f"- Distanz: **{row['distanz_km']} km**",
-            "",
-            "**Fahrzeitvergleich**",
-            f"- 1 · OSRM Basis: **{row['osrm_basis_min']} min**",
-            f"- 2 · TomTom Live-Prognose: **{duration_text(row['tomtom_live_min'])}**",
-            f"- 3 · TomTom Historisch: **{duration_text(row['tomtom_historisch_min'])}**",
-            f"- 4 · Eigener Forecast: **{row['forecast_fahrzeit_min']} min**",
-            f"- 5 · IST: **{ist_text}**",
-            "",
-            f"- Service geplant: **{row['service_geplant_min']} min**",
-            (
-                "- Service aktuell verwendet: "
-                f"**{row.get('service_verwendet_min', row['service_geplant_min'])} min**"
-            ),
-            f"- Forecast Gesamt: **{row['forecast_gesamt_min']} min**",
-            str(row.get("forecast_warnungen", "")),
-            "",
-        ]
-
-    return "\n".join(lines)
-
-
-def forecast_stop_choices(forecast):
-    if not forecast:
-        return []
-
-    choices = []
-    seen = set()
-
-    for segment in forecast.get("segments") or []:
-        stop_id = segment.get("to_stop_id")
-
-        if (
-            not stop_id
-            or stop_id == "DEPOT"
-            or stop_id in seen
-        ):
-            continue
-
-        seen.add(stop_id)
-        choices.append(str(stop_id))
-
-    return choices
-
-
-def update_reforecast_stops(forecasts_json, vehicle_id):
-    forecasts = _json_load(forecasts_json, {})
-    forecast = forecasts.get(str(vehicle_id), {})
-    choices = forecast_stop_choices(forecast)
-
-    return gr.update(
-        choices=choices,
-        value=choices[0] if choices else None,
-        interactive=bool(choices)
-    )
-
-
-def reforecast_from_stop(
-    forecasts_json,
-    routes_json,
-    depot_json,
-    vehicle_table,
-    vehicle_id,
-    stop_id,
-    actual_service_min,
-    actual_departure
-):
-    forecasts = _json_load(forecasts_json, {})
-    routes = _json_load(routes_json, [])
-    depot = _json_load(depot_json, {})
-    vehicles = pd.DataFrame(vehicle_table)
-
-    if not vehicle_id:
-        raise gr.Error("Bitte LKW auswählen.")
-    if not stop_id:
-        raise gr.Error("Bitte Stopp auswählen.")
-
-    previous = forecasts.get(str(vehicle_id))
-
-    if not previous:
-        raise gr.Error("Für diesen LKW existiert kein Forecast.")
-
-    route = next(
-        (
-            route
-            for route in routes
-            if str(route.get("vehicle_id")) == str(vehicle_id)
-        ),
-        None
-    )
-
-    if not route:
-        raise gr.Error("Route des LKW wurde nicht gefunden.")
-
-    vehicle_rows = vehicles[
-        vehicles["vehicle_id"].astype(str) == str(vehicle_id)
-    ]
-
-    params = (
-        {}
-        if vehicle_rows.empty
-        else vehicle_parameters(vehicle_rows.iloc[0])
-    )
-
-    service_seconds = None
-
-    if (
-        actual_service_min is not None
-        and str(actual_service_min).strip() != ""
-    ):
-        service_seconds = max(
-            0,
-            int(round(float(actual_service_min) * 60))
-        )
-
-    departure_value = str(actual_departure or "").strip() or None
-
-    try:
-        new_forecast = recalculate_tour_from_stop(
-            previous_forecast=previous,
-            route=route,
-            depot=depot,
-            from_stop_id=str(stop_id),
-            new_departure_time=departure_value,
-            actual_service_s=service_seconds,
-            api_key=TOMTOM_API_KEY,
-            timeout=TIMEOUT,
-            vehicle_parameters=params,
-        )
-    except Exception as exc:
-        raise gr.Error(
-            "Neuberechnung fehlgeschlagen: "
-            f"{type(exc).__name__}: {exc}"
-        )
-
-    forecasts[str(vehicle_id)] = new_forecast
-
-    try:
-        log_result = log_forecast(new_forecast)
-    except Exception as exc:
-        log_result = {"error": str(exc)}
-
-    summary_rows = []
-    segment_table_rows = []
-
-    for vid, forecast in forecasts.items():
-        summary_rows.append(tour_summary(forecast))
-
-        for row in segment_rows(forecast):
-            row["vehicle_id"] = vid
-            row["forecast_version"] = forecast.get("forecast_version")
-            segment_table_rows.append(row)
-
-    summary_df = pd.DataFrame(summary_rows)
-    segments_df = pd.DataFrame(segment_table_rows)
-
-    debug = {
-        "reforecast_vehicle": vehicle_id,
-        "reforecast_from_stop": stop_id,
-        "new_forecast_version": new_forecast.get("forecast_version"),
-        "logging": log_result,
-        "forecast": new_forecast,
-    }
-
-    return (
-        summary_df,
-        segments_df,
-        build_forecast_markdown(summary_df),
-        json.dumps(forecasts, ensure_ascii=False, default=str),
-        json.dumps(debug, ensure_ascii=False, indent=2, default=str),
-        (
-            f"✅ **{vehicle_id} ab Stopp {stop_id} neu berechnet. "
-            f"Forecast-Version {new_forecast.get('forecast_version')} gespeichert.**"
-        ),
+        f"Forecast für {len(forecasts)} von {len(routes)} Touren berechnet.",
     )
 
 
@@ -1104,48 +1081,130 @@ def logger_status_markdown():
 
 
 CSS = """
-html, body { background: #0f1117 !important; }
-.gradio-container, .gradio-container > .main {
-    background: #0f1117 !important;
-    color: #f3f4f6 !important;
+html, body { background: #eef5fa !important; color-scheme: light; }
+.gradio-container {
+    min-height: 100vh; max-width: 1440px !important; margin: auto;
+    padding: 32px 28px !important;
+    background: radial-gradient(ellipse at 8% 0%, #d9f5ee 0%, transparent 45%),
+                radial-gradient(ellipse at 95% 12%, #e0e5ff 0%, transparent 42%),
+                linear-gradient(145deg, #f5fafc, #edf3fa) !important;
 }
-.gradio-container { min-height: 100vh; }
-.step-title {
-    font-size: 1.35rem;
-    font-weight: 750;
-    margin-bottom: .35rem;
+.gradio-container > .main { background: transparent !important; }
+#app-hero {
+    padding: 32px; margin-bottom: 18px; border: 1px solid white;
+    border-radius: 28px; background: linear-gradient(120deg, #ffffffdd, #ffffff80);
+    box-shadow: 0 12px 45px #355b8010, inset 0 1px 0 white;
 }
-#tour-map iframe {
-    width: 100% !important;
-    min-height: 560px !important;
-    height: 62vh !important;
-    border-radius: 12px;
+.hero-top { display: flex; justify-content: space-between; gap: 16px; align-items: center; }
+.hero-brand { font-size: 12px; font-weight: 750; letter-spacing: .16em; color: #426078; }
+.hero-badge { border: 1px solid #b7dbd3; border-radius: 99px; padding: 6px 12px; color: #246656; background: #e7f7f0; font-size: 12px; }
+#app-hero h1 { font-size: clamp(28px, 4vw, 46px); line-height: 1.15; letter-spacing: -.04em; color: #19364d; margin: 24px 0 12px; font-weight: 750; }
+#app-hero p { color: #50677c; max-width: 660px; font-size: 16px; line-height: 1.65; margin: 0; }
+.hero-pills { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 24px; }
+.hero-pills span { padding: 8px 13px; border: 1px solid #ffffff; border-radius: 99px; background: #ffffffb8; color: #3e5b70; font-size: 12px; }
+#workflow-tabs > .tab-nav {
+    display: flex; flex-wrap: wrap; gap: 6px; padding: 8px;
+    background: #ffffffb8; border: 1px solid white; border-radius: 20px;
+    box-shadow: 0 4px 18px #355b8009; margin-bottom: 18px;
 }
-#tour-map { min-height: 560px; }
+#workflow-tabs > .tab-nav button {
+    flex: 1 1 auto; min-height: 46px; border: 0; border-radius: 13px;
+    color: #476176; font-size: 13px; padding: 10px 14px; transition: background .18s ease;
+}
+#workflow-tabs > .tab-nav button[aria-selected="true"] {
+    background: #235e83 !important; color: white !important; box-shadow: 0 4px 12px #235e8326;
+}
+#workflow-tabs > .tabitem {
+    padding: 24px !important; border: 1px solid white !important; border-radius: 24px !important;
+    background: #ffffffa6 !important; box-shadow: 0 12px 36px #355b800b;
+}
+.gradio-container .block { border-radius: 16px !important; }
+.gradio-container button { min-height: 44px; }
+.gradio-container button.primary { box-shadow: 0 5px 15px #236d9220; }
+.gradio-container :is(button, input, textarea, select):focus-visible {
+    outline: 3px solid #247ca5 !important; outline-offset: 3px;
+}
+.step-intro { margin-bottom: 12px; }
+.step-intro h2 { color: #19364d; letter-spacing: -.025em; }
+.step-intro p { color: #50677c; }
+#tour-map iframe { width: 100% !important; min-height: 480px; height: 62vh; border: 0; border-radius: 20px; }
+#tour-map { min-height: 240px; }
+@supports (backdrop-filter: blur(16px)) {
+    #app-hero, #workflow-tabs > .tab-nav { backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); }
+}
+/* Prevent wide Gradio rows, dataframes and embedded content from clipping mobile view. */
+.gradio-container, .gradio-container * { box-sizing: border-box; }
+.gradio-container { width: 100% !important; max-width: 100vw !important; min-width: 0 !important; }
+.gradio-container :is(.gr-row, .gr-column, .gr-group, .gr-form, .gr-panel, .block, .wrap, .contain) { min-width: 0 !important; max-width: 100%; }
+.gradio-container :is(.table-wrap, .dataframe, .overflow-x-auto) { max-width: 100%; overflow-x: auto !important; -webkit-overflow-scrolling: touch; }
+.gradio-container :is(img, iframe, svg) { max-width: 100%; }
 @media(max-width:768px) {
-    .gradio-container {
-        padding-left: 0 !important;
-        padding-right: 0 !important;
-    }
-    #tour-map iframe {
-        min-height: 500px !important;
-        height: 58vh !important;
-    }
+    .gradio-container :is(.gr-row, .gradio-row) { flex-wrap: wrap !important; }
+    .gradio-container :is(.gr-column, .gradio-column) { min-width: 0 !important; flex: 1 1 100% !important; width: 100% !important; }
+    #workflow-tabs > .tab-nav { min-width: 0; width: 100%; }
+    #workflow-tabs > .tab-nav button { min-width: 0; overflow-wrap: anywhere; }
+    #workflow-tabs > .tabitem { min-width: 0; max-width: 100%; }
+    #tour-map, #tour-map iframe { width: 100% !important; max-width: 100% !important; }
+}
+@media(max-width:768px) {
+    .gradio-container { padding: 16px 10px !important; }
+    #app-hero { padding: 22px 18px; border-radius: 22px; }
+    .hero-top { flex-wrap: wrap; gap: 10px; }
+    #workflow-tabs > .tab-nav { display: grid; grid-template-columns: 1fr 1fr; }
+    #workflow-tabs > .tab-nav button { text-align: left; font-size: 12px; padding: 10px; }
+    #workflow-tabs > .tabitem { padding: 14px !important; }
+    #tour-map iframe { min-height: 360px; height: 55vh; }
+}
+@media(prefers-reduced-motion: reduce) {
+    .gradio-container *, .gradio-container *::before, .gradio-container *::after { transition: none !important; animation: none !important; }
 }
 """
 
 
+
+# Keep the requested light palette even when the host uses dark mode.
+THEME = gr.themes.Soft(
+    primary_hue="sky", secondary_hue="teal", neutral_hue="slate",
+    font=["ui-sans-serif", "system-ui", "sans-serif"],
+    font_mono=["ui-monospace", "monospace"], radius_size="lg",
+)
+_light_tokens = {
+    "body_background_fill": "#eef5fa", "body_text_color": "#243e53",
+    "body_text_color_subdued": "#52697b",
+    "background_fill_primary": "#ffffff", "background_fill_secondary": "#f0f6fa",
+    "block_background_fill": "#ffffffd9", "block_border_color": "#dbe7ee",
+    "block_label_background_fill": "#f4f8fb", "block_label_text_color": "#38566c",
+    "block_title_text_color": "#243e53", "block_info_text_color": "#52697b",
+    "input_background_fill": "#ffffff", "input_border_color": "#cbdde7",
+    "input_placeholder_color": "#657b8c", "input_background_fill_focus": "#ffffff",
+    "border_color_primary": "#dbe7ee", "border_color_accent": "#277b9e",
+    "panel_background_fill": "#f4f8fb", "panel_border_color": "#dbe7ee",
+    "button_primary_background_fill": "#235e83", "button_primary_background_fill_hover": "#194c6d",
+    "button_primary_text_color": "#ffffff", "button_primary_border_color": "#235e83",
+    "button_secondary_background_fill": "#edf5f9", "button_secondary_background_fill_hover": "#e0eef5",
+    "button_secondary_text_color": "#294e66", "button_secondary_border_color": "#cfdee8",
+    "table_text_color": "#243e53", "table_even_background_fill": "#f3f8fb",
+    "table_odd_background_fill": "#ffffff", "table_border_color": "#dbe7ee",
+    "code_background_fill": "#f1f6fa", "accordion_text_color": "#38566c",
+}
+THEME = THEME.set(**_light_tokens, **{key + "_dark": value for key, value in _light_tokens.items()})
+
 with gr.Blocks(
     title="Logistik Forecast 4.9.5",
-    css=CSS
+    css=CSS,
+    theme=THEME
 ) as demo:
 
-    gr.Markdown(
-        "# Logistik Forecast 4.9.5\n"
-        "**Adressen → Flotte → Cluster → OSRM → "
-        "TomTom Segment-Forecast → Reforecast → ML-Dataset**"
-    )
+    gr.HTML("""
+        <div class="hero-top"><span class="hero-brand">LOGISTIK / FORECAST</span><span class="hero-badge">AI Workflow · Testversion</span></div>
+        <h1>Touren planen.<br>Ankünfte besser einschätzen.</h1>
+        <p>Von der ersten Adresse bis zum datenbasierten Vergleich.
+        Plane deine Flotte, aktualisiere Prognosen und prüfe die Ergebnisse.</p>
+        <div class="hero-pills"><span>01 — Planung</span><span>02 — Forecast &amp; Reforecast</span><span>03 — KI-Forecast</span></div>
+    """, elem_id="app-hero")
 
+    ml_state = gr.State(load_builtin_model())
+    gr.Markdown("**KI-Modell eingebaut und aktiv.** Vortrainiert auf synthetischen Daten für den technischen Machbarkeitsnachweis.")
     orders_state = gr.State("[]")
     address_state = gr.State("[]")
     candidates_state = gr.State("{}")
@@ -1154,13 +1213,13 @@ with gr.Blocks(
     depot_state = gr.State("")
     cluster_state = gr.State("[]")
     routes_state = gr.State("[]")
-    forecasts_state = gr.State("{}")
     selected_order_state = gr.State("")
     selected_hits_state = gr.State("[]")
 
-    with gr.Tabs():
+    with gr.Tabs(elem_id="workflow-tabs"):
 
         with gr.Tab("1 · Aufträge & Adressen"):
+            gr.Markdown("## Aufträge & Adressen\nCSV auswählen und importieren. CSV importieren, die Adressprüfung starten und unklare Treffer anhand der Vorschläge bestätigen. Gib die geprüften Adressen anschließend mit „Adressprüfung abschließen“ für die Tourenplanung frei.", elem_classes=["step-intro"])
             upload = gr.File(
                 label="CSV-Datei",
                 file_types=[".csv"],
@@ -1168,45 +1227,49 @@ with gr.Blocks(
             )
             import_btn = gr.Button("CSV importieren", variant="primary")
             order_summary = gr.Markdown()
-            orders_table = gr.Dataframe(
-                label="Aufträge",
-                interactive=False,
-                wrap=True
-            )
             geocode_btn = gr.Button("Adressen automatisch prüfen")
             address_status_md = gr.Markdown()
-            address_table = gr.Dataframe(
-                headers=[
-                    "auftrag", "kunde", "adresse",
-                    "status", "treffer", "sicherheit"
-                ],
-                label="Adressprüfung",
-                interactive=False,
-                wrap=True,
-            )
-            review_info = gr.Markdown("Noch keine Prüfung gestartet.")
-            review_address = gr.Textbox(
-                label="Adresse korrigieren oder ergänzen",
-                placeholder="Straße Hausnummer, PLZ Ort",
-                interactive=False,
-            )
-            search_review_btn = gr.Button(
-                "Korrigierte Adresse erneut suchen"
-            )
-            address_choice = gr.Radio(
-                choices=[],
-                label="Welche Adresse ist richtig?",
-                interactive=False
-            )
-            confirm_review_btn = gr.Button(
-                "Adresse bestätigen",
-                variant="primary"
-            )
-            confirm_status = gr.Markdown()
-            finish_addresses_btn = gr.Button("Adressprüfung abschließen")
             finish_status = gr.Markdown()
+            with gr.Accordion("Aufträge und Prüfergebnisse anzeigen", open=False):
+                orders_table = gr.Dataframe(
+                    label="Aufträge",
+                    interactive=False,
+                    wrap=True
+                )
+                address_table = gr.Dataframe(
+                    headers=[
+                        "auftrag", "kunde", "adresse",
+                        "status", "treffer", "sicherheit"
+                    ],
+                    label="Adressprüfung",
+                    interactive=False,
+                    wrap=True,
+                )
+            with gr.Group() as address_review:
+                review_info = gr.Markdown("Noch keine Prüfung gestartet.")
+                review_address = gr.Textbox(
+                    label="Adresse korrigieren oder ergänzen",
+                    placeholder="Straße Hausnummer, PLZ Ort",
+                    interactive=False,
+                )
+                search_review_btn = gr.Button(
+                    "Korrigierte Adresse erneut suchen"
+                )
+                address_choice = gr.Radio(
+                    choices=[],
+                    label="Welche Adresse ist richtig?",
+                    interactive=False
+                )
+                confirm_review_btn = gr.Button(
+                    "Adresse bestätigen",
+                    variant="primary"
+                )
+                confirm_status = gr.Markdown()
+            finish_addresses_btn = gr.Button("Adressprüfung abschließen")
+
 
         with gr.Tab("2 · Depot, Flotte & Regionen"):
+            gr.Markdown("## Depot & Flotte\nBestätige das Depot. Die App ermittelt aus den Aufträgen die Tourgruppen und die benötigten Lkw.", elem_classes=["step-intro"])
             depot_input = gr.Textbox(
                 label="Depotadresse",
                 placeholder="z. B. Mercedesstraße 1, 70372 Stuttgart"
@@ -1224,30 +1287,36 @@ with gr.Blocks(
             )
             depot_status = gr.Markdown()
 
-            with gr.Row():
-                small_count = gr.Number(
-                    label="14-t-LKW",
-                    value=3,
-                    minimum=0,
-                    precision=0
-                )
-                large_count = gr.Number(
-                    label="40-t-LKW",
-                    value=3,
-                    minimum=0,
-                    precision=0
-                )
-                fleet_btn = gr.Button("Flotte aktualisieren")
+            gr.Markdown("### Automatische Fahrerplanung und Zeitbudget\nAlle Zeiten in Minuten **ab Tourstart**. Die benötigte Fahreranzahl wird automatisch aus den Touren ermittelt, mit einem Fahrer je Tour. Das gemeinsame Zeitprofil gilt für alle geplanten Fahrer; der berechnete Bedarf muss tatsächlich verfügbar sein. Vorgaben sind Demowerte und müssen anhand der Fahreraufzeichnungen angepasst werden. Standardprofil: 9 Stunden Tageslenkzeit, volle 45-Minuten-Pausen, keine 10-Stunden-Verlängerung. Service zählt als Arbeit, nicht als Pause.")
+            driver_inputs = gr.Dataframe(headers=DRIVER_COLUMNS,
+                value=[["FAHRER-01", *DRIVER_DEFAULTS.values()]],
+                datatype=["str"] + ["number"] * len(DRIVER_DEFAULTS),
+                type="pandas", row_count=(1, "fixed"), interactive=True, label="Gemeinsames Zeitbudget für die automatische Fahrerplanung")
+            gr.Markdown("`remaining_drive_min`: Tagesrestlenkzeit · `drive_since_break_min`: Lenkzeit seit letzter voller Pause · `work_since_break_min`: Arbeit seit letzter Pause · `remaining_work_min`: Restarbeitszeit · `remaining_duty_min`: Zeit bis Beginn täglicher Ruhe · Wochen-/Doppelwochenrestlenkzeit und Zeit bis Wochenruhe ebenfalls eintragen.")
+            vehicle_table = gr.State([])
+            gr.Markdown("### Eingeplante Fahrzeuge")
 
-            fleet_status = gr.Markdown()
-            vehicle_table = gr.Dataframe(
-                value=make_fleet(3, 3),
-                label="Verfügbare Fahrzeuge",
-                interactive=True,
-                wrap=True,
-            )
+            @gr.render(inputs=vehicle_table)
+            def render_vehicle_cards(fleet):
+                if not fleet:
+                    gr.Markdown("Noch keine Touren geplant.")
+                for vehicle in fleet:
+                    vehicle_id = vehicle["vehicle_id"]
+                    with gr.Group():
+                        gr.Markdown(
+                            f"**{vehicle_id} · {vehicle['class']} · {vehicle.get('driver_id', '')}**  \n"
+                            f"Palettenkapazität: **{vehicle['pallet_capacity']}** · "
+                            f"Maximale Zuladung: **{vehicle['payload_kg']} kg** · "
+                            f"Verbleibende Lenkzeit: **{vehicle['remaining_drive_min']} min** · "
+                            f"Geplante Pausen: **{vehicle.get('planned_break_min', 0)} min** · "
+                            f"Tourdauer mit Service und Pausen: **{vehicle.get('planned_tour_min', 0)} min**"
+                        )
+
+            with gr.Row():
+                start_date_input = gr.Textbox(label="Tourdatum", value=current_tour_date, placeholder="03.11.26")
+                start_time_input = gr.Textbox(label="Startzeit", value="07:00", placeholder="07:00")
             cluster_btn = gr.Button(
-                "Regionen bilden & LKW zuweisen",
+                "Mit KI-Fahrzeiten Tourgruppen und Lkw ermitteln",
                 variant="primary"
             )
             cluster_status = gr.Markdown()
@@ -1260,9 +1329,16 @@ with gr.Blocks(
                 wrap=True
             )
 
-        with gr.Tab("3 · Routenoptimierung"):
+        with gr.Tab("3 · Routen & Forecast"):
+            gr.Markdown("## Deine Touren im Überblick\nBerechne die Straßenrouten und den Forecast. Wähle anschließend einen Lkw aus.", elem_classes=["step-intro"])
+            gr.Markdown(
+                "🟢 **TomTom API konfiguriert**"
+                if TOMTOM_API_KEY
+                else "KI-Forecast aktiv · TomTom-Livevergleich nicht konfiguriert"
+            )
+            logger_status_ui = gr.Markdown(logger_status_markdown())
             optimize_btn = gr.Button(
-                "LKW-Routen optimieren",
+                "Routen und Forecast berechnen",
                 variant="primary"
             )
             optimize_status = gr.Markdown()
@@ -1275,99 +1351,54 @@ with gr.Blocks(
                 label="Tour anzeigen",
                 interactive=False
             )
+            loading_table = gr.Dataframe(label="Ladeplan für den ausgewählten LKW", interactive=False)
             map_html = gr.HTML(elem_id="tour-map")
-            routing_debug = gr.Code(
-                label="Routing-Debug",
-                language="json"
-            )
+            with gr.Accordion("Technische Details", open=False):
+                routing_debug = gr.Code(
+                    label="Routing-Debug",
+                    language="json"
+                )
 
-        with gr.Tab("4 · Dynamischer Forecast"):
-            gr.Markdown(
-                "🟢 **TomTom API konfiguriert**"
-                if TOMTOM_API_KEY
-                else "🔴 **TOMTOM_API_KEY fehlt**"
-            )
-            logger_status_ui = gr.Markdown(logger_status_markdown())
-            start_time_input = gr.Textbox(
-                label="Tourstart",
-                placeholder="2026-08-20T07:00:00+02:00"
-            )
-            forecast_btn = gr.Button(
-                "Segment-Forecast berechnen",
-                variant="primary"
-            )
             forecast_status = gr.Markdown()
-            forecast_md = gr.Markdown()
-            forecast_table = gr.Dataframe(
-                label="Tourübersicht – 5 Zeitkategorien",
-                wrap=True
-            )
-            segment_table = gr.Dataframe(
-                label="Forecast je Streckenabschnitt",
-                wrap=True
-            )
-            traffic_debug = gr.Code(
-                label="Forecast / Logging Debug",
-                language="json"
-            )
+            forecast_cards = gr.HTML()
+            forecast_by_vehicle = gr.State({})
+            with gr.Accordion("Technische Details", open=False):
+                traffic_debug = gr.Code(
+                    label="Forecast / Logging Debug",
+                    language="json"
+                )
 
-        with gr.Tab("5 · Reforecast ab Stopp"):
-            reforecast_vehicle = gr.Dropdown(
-                choices=[],
-                label="LKW",
-                interactive=False
-            )
-            reforecast_stop = gr.Dropdown(
-                choices=[],
-                label="Neuberechnung ab Stopp",
-                interactive=False
-            )
-            actual_service_min = gr.Number(
-                label="Tatsächliche Servicezeit an diesem Stopp (Minuten)",
-                minimum=0,
-                precision=0,
-            )
-            actual_departure_input = gr.Textbox(
-                label="Tatsächliche / neue Abfahrtszeit",
-                placeholder="2026-08-20T10:35:00+02:00"
-            )
-            reforecast_btn = gr.Button(
-                "Ab diesem Stopp neu berechnen",
-                variant="primary"
-            )
-            reforecast_status = gr.Markdown()
-            reforecast_summary = gr.Dataframe(
-                label="Aktuelle Forecast-Versionen",
-                wrap=True
-            )
-            reforecast_segments = gr.Dataframe(
-                label="Aktuelle Segmente",
-                wrap=True
-            )
-            reforecast_md = gr.Markdown()
-            reforecast_debug = gr.Code(
-                label="Reforecast-Debug",
-                language="json"
-            )
+            live_deviations = gr.Markdown()
+
+    def import_orders(file):
+        return (*read_csv(file), "[]", "[]", "{}", "", "[]",
+                gr.update(value="", interactive=False),
+                "Noch keine Prüfung gestartet.",
+                gr.update(choices=[], value=None, interactive=False),
+                pd.DataFrame(), "", "", "CSV importiert. Starte jetzt die Adressprüfung.")
 
     import_btn.click(
-        read_csv,
+        import_orders,
         upload,
-        [orders_table, order_summary, orders_state]
+        [orders_table, order_summary, orders_state, geo_state,
+         address_state, candidates_state, selected_order_state, selected_hits_state,
+         review_address, review_info, address_choice, address_table,
+         address_status_md, confirm_status, finish_status],
     )
+
+    def start_address_review():
+        return "[]", "Adressprüfung läuft …"
 
     geocode_event = geocode_btn.click(
+        start_address_review,
+        outputs=[geo_state, finish_status],
+    ).success(
         geocode_all,
         orders_state,
-        [
-            address_table,
-            address_state,
-            candidates_state,
-            address_status_md
-        ],
+        [address_table, address_state, candidates_state, address_status_md],
     )
 
-    geocode_event.then(
+    geocode_event.success(
         prepare_review,
         [address_state, candidates_state],
         [
@@ -1398,7 +1429,7 @@ with gr.Blocks(
         ],
     )
 
-    confirm_review_btn.click(
+    confirm_event = confirm_review_btn.click(
         confirm_review,
         [
             address_state,
@@ -1449,39 +1480,52 @@ with gr.Blocks(
         ],
     )
 
-    fleet_btn.click(
-        update_fleet,
-        [
-            small_count,
-            large_count
-        ],
-        [
-            vehicle_table,
-            fleet_status
-        ],
-    )
-
     cluster_btn.click(
         create_clusters,
         [
             geo_state,
-            vehicle_table,
-            depot_state
+            depot_state,
+            start_date_input, start_time_input, ml_state, driver_inputs
         ],
         [
             cluster_assignments,
             cluster_summary,
             cluster_state,
-            cluster_status
+            cluster_status,
+            routes_state,
+            vehicle_table,
         ],
     )
 
-    optimize_btn.click(
+    def auto_plan_drivers(geo_json, depot_json, start_date, start_time, bundle, profile):
+        if not geo_json or geo_json == "[]" or not depot_json:
+            return (pd.DataFrame(), pd.DataFrame(), "[]",
+                    "Fahrerbedarf wird nach bestätigten Adressen und Depot automatisch berechnet.",
+                    "[]", [])
+        return create_clusters(geo_json, depot_json, start_date, start_time, bundle, profile)
+
+    for planning_input in (geo_state, depot_state):
+        planning_input.change(
+            auto_plan_drivers,
+            [geo_state, depot_state, start_date_input, start_time_input, ml_state, driver_inputs],
+            [cluster_assignments, cluster_summary, cluster_state, cluster_status, routes_state, vehicle_table],
+        )
+
+    for departure_input in (start_date_input, start_time_input, driver_inputs):
+        departure_input.change(lambda: ("[]", "[]", [], {}, "", "Startzeit oder Fahrerbudgets geändert: Tourgruppen bitte neu berechnen."),
+            outputs=[cluster_state, routes_state, vehicle_table, forecast_by_vehicle, forecast_cards, cluster_status])
+
+    clear_results = optimize_btn.click(
+        lambda: ({}, "", "", "", "[]"),
+        outputs=[forecast_by_vehicle, forecast_cards, live_deviations, forecast_status, routes_state],
+    )
+    route_event = clear_results.success(
         optimize_routes,
         [
             cluster_state,
             vehicle_table,
-            depot_state
+            depot_state,
+            start_date_input, start_time_input, ml_state
         ],
         [
             optimized_stops,
@@ -1503,59 +1547,36 @@ with gr.Blocks(
         map_html,
     )
 
-    forecast_btn.click(
+    def show_loading_plan(routes_json, vehicle_id):
+        route = next((route for route in _json_load(routes_json, [])
+                      if str(route.get("vehicle_id")) == str(vehicle_id)), None)
+        return pd.DataFrame(loading_plan(route["stops"]) if route else [])
+
+    route_selector.change(show_loading_plan, [routes_state, route_selector], loading_table)
+
+    forecast_event = route_event.success(
         calculate_all_forecasts,
         [
             routes_state,
             depot_state,
             vehicle_table,
-            start_time_input
+            start_date_input,
+            start_time_input,
+            ml_state
         ],
-        [
-            forecast_table,
-            segment_table,
-            forecast_md,
-            forecasts_state,
-            traffic_debug,
-            reforecast_vehicle,
-            reforecast_stop,
-            forecast_status,
-        ],
+        [forecast_by_vehicle, live_deviations, traffic_debug, forecast_status],
     )
 
-    reforecast_vehicle.change(
-        update_reforecast_stops,
-        [
-            forecasts_state,
-            reforecast_vehicle
-        ],
-        reforecast_stop,
-    )
+    def show_vehicle_forecast(cards, vehicle_id):
+        return cards.get(vehicle_id, "Für diesen Lkw liegt kein Forecast vor.") if vehicle_id else ""
 
-    reforecast_btn.click(
-        reforecast_from_stop,
-        [
-            forecasts_state,
-            routes_state,
-            depot_state,
-            vehicle_table,
-            reforecast_vehicle,
-            reforecast_stop,
-            actual_service_min,
-            actual_departure_input,
-        ],
-        [
-            reforecast_summary,
-            reforecast_segments,
-            reforecast_md,
-            forecasts_state,
-            reforecast_debug,
-            reforecast_status,
-        ],
-    )
+    forecast_inputs = [forecast_by_vehicle, route_selector]
+    forecast_event.success(show_vehicle_forecast, forecast_inputs, forecast_cards)
+    route_selector.change(show_vehicle_forecast, forecast_inputs, forecast_cards)
 
 
 if __name__ == "__main__":
+    demo.queue()
     demo.launch(
         server_name="0.0.0.0",
         server_port=int(os.getenv("PORT", "7860")),

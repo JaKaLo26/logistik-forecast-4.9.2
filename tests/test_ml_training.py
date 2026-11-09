@@ -5,7 +5,7 @@ import pytest
 
 from src.ml_features import INPUTS, features
 from src.ml_predict import predict_if_configured
-from src.ml_training import prepare, split, folds, metrics, train
+from src.measured_training import prepare, split, folds, metrics, train
 
 
 def fixture():

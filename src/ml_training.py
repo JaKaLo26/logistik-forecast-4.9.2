@@ -1,175 +1,191 @@
-"""Reproducible, tour-disjoint temporal evaluation. Run python -m src.ml_training --help."""
-import argparse
+"""IHK experiment: immutable feature snapshots, tour holdout and measured labels."""
+from __future__ import annotations
 import hashlib
 import json
+import math
+import uuid
+import tempfile
 from pathlib import Path
-
 import joblib
+from datetime import datetime
 import numpy as np
 import pandas as pd
-import sklearn
-from sklearn.base import clone
-from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, VotingRegressor
-from sklearn.linear_model import Ridge
-from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
-from sklearn.pipeline import make_pipeline
-from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_absolute_error, mean_squared_error
 
-from src.ml_features import INPUTS, SCHEMA_VERSION, features
+FEATURES = ['osrm_baseline_s', 'distance_m', 'departure_hour', 'weekday']
+REQUIRED = ['tour_id', 'segment_id', 'prediction_created_at', 'planned_departure_at',
+            'actual_departure_at', 'actual_arrival_at', 'actual_recorded_at',
+            'osrm_baseline_s', 'distance_m', 'data_origin']
 
+def features(baseline, distance, departure):
+    dt = datetime.fromisoformat(str(departure).replace('Z', '+00:00'))
+    if dt.tzinfo is None:
+        raise ValueError('Zeitangaben benötigen eine Zeitzone, z. B. +02:00.')
+    if not all(math.isfinite(float(v)) and float(v) > 0 for v in (baseline, distance)):
+        raise ValueError('OSRM-Zeit und Distanz müssen positiv und endlich sein.')
+    local = pd.Timestamp(dt).tz_convert('Europe/Berlin')
+    return [float(baseline), float(distance), local.hour + local.minute / 60, local.weekday()]
 
-def prepare(frame):
-    required = INPUTS + ['tour_id', 'segment_id', 'departure_time', 'actual_arrival',
-                         'actual_travel_s', 'prediction_recorded_at', 'label_source']
-    missing = sorted(set(required) - set(frame.columns))
+def validate_data(df):
+    missing = set(REQUIRED) - set(df.columns)
     if missing:
-        raise ValueError(f'Missing columns: {missing}')
-    data = frame.copy()
-    if data[['tour_id', 'segment_id']].isna().any().any():
-        raise ValueError('Tour and segment identifiers must not be missing.')
-    if data.duplicated(['tour_id', 'segment_id']).any():
-        raise ValueError('Duplicate tour/segment: select one pre-departure forecast snapshot first.')
-    if not data.label_source.eq('measured').all():
-        raise ValueError('Only measured IST labels are accepted; no synthetic or provider estimates.')
-    for col in ['departure_time', 'actual_arrival', 'prediction_recorded_at']:
-        data[col] = pd.to_datetime(data[col], utc=True, errors='coerce')
-    for col in INPUTS + ['actual_travel_s']:
-        data[col] = pd.to_numeric(data[col], errors='coerce')
-    valid = np.isfinite(data[INPUTS + ['actual_travel_s']]).all(axis=1)
-    valid &= (data[INPUTS[:-1]] >= 0).all(axis=1)
-    valid &= data.osrm_baseline_s.gt(0) & data.actual_travel_s.gt(0)
-    valid &= data.data_confidence.between(0, 1)
-    valid &= data.actual_arrival.gt(data.departure_time)
-    valid &= data.prediction_recorded_at.le(data.departure_time)
-    rejected = data.loc[~valid].copy()
-    data = data.loc[valid].sort_values(['departure_time', 'tour_id', 'segment_id']).reset_index(drop=True)
-    if data.tour_id.nunique() < 12:
-        raise ValueError('At least 12 valid independent tours are required for temporal evaluation.')
-    return data, rejected
+        raise ValueError('Fehlende Spalten: ' + ', '.join(sorted(missing)))
+    df = df.copy()
+    if df[REQUIRED].isna().any().any():
+        raise ValueError('Pflichtfelder enthalten fehlende Werte.')
+    if not df.data_origin.isin(['real', 'synthetic', 'simulation']).all() or df.data_origin.nunique() != 1:
+        raise ValueError('Genau eine Datenherkunft je Experiment: real, synthetic oder simulation.')
+    if df.tour_id.astype(str).str.strip().eq('').any() or df.segment_id.astype(str).str.strip().eq('').any():
+        raise ValueError('Tour- und Segment-ID dürfen nicht leer sein.')
+    if df.duplicated(['tour_id', 'segment_id']).any():
+        raise ValueError('Pro Tour/Segment genau einen ursprünglichen Forecast verwenden; keine Reforecast-Duplikate.')
+    for name in ['prediction_created_at', 'planned_departure_at', 'actual_departure_at', 'actual_arrival_at', 'actual_recorded_at']:
+        for value in df[name]:
+            if datetime.fromisoformat(str(value).replace('Z', '+00:00')).tzinfo is None:
+                raise ValueError(f'{name}: Zeitzone fehlt.')
+        df[name] = pd.to_datetime(df[name], utc=True, format='ISO8601')
+    if not ((df.prediction_created_at <= df.actual_departure_at) &
+            (df.actual_arrival_at > df.actual_departure_at) &
+            (df.actual_recorded_at >= df.actual_arrival_at)).all():
+        raise ValueError('Ungültige Zeitfolge: Prognose ≤ Abfahrt < Ankunft ≤ IST-Erfassung.')
+    for col in ['osrm_baseline_s', 'distance_m']:
+        df[col] = pd.to_numeric(df[col], errors='raise')
+        if not (np.isfinite(df[col]) & (df[col] > 0)).all():
+            raise ValueError(f'{col} muss positiv und endlich sein.')
+    df['target_s'] = (df.actual_arrival_at - df.actual_departure_at).dt.total_seconds()
+    return df
+
+def train_experiment(df):
+    df = validate_data(df)
+    tours = df.groupby('tour_id').prediction_created_at.min().sort_values(kind='stable')
+    if len(tours) < 5:
+        raise ValueError('Mindestens fünf unabhängige Touren erforderlich; für belastbare Ergebnisse deutlich mehr.')
+    cut = max(1, int(len(tours) * .8))
+    test_ids = set(tours.index[cut:])
+    test = df[df.tour_id.isin(test_ids)].copy()
+    validation_start = max(2, int(len(tours) * .6))
+    validation = df[df.tour_id.isin(tours.index[validation_start:cut])].copy()
+    train = df[df.tour_id.isin(tours.index[:validation_start])].copy()
+    cutoff = test.prediction_created_at.min()
+    eligible_validation = validation.groupby('tour_id').actual_recorded_at.max()
+    validation = validation[validation.tour_id.isin(eligible_validation[eligible_validation < cutoff].index)]
+    if validation.empty:
+        raise ValueError('Keine vollständig abgeschlossene Validierungstour vor dem Testzeitraum.')
+    training_cutoff = validation.prediction_created_at.min()
+    # Entire tour is purged if any of its labels was unavailable at evaluation cutoff.
+    eligible = train.groupby('tour_id').actual_recorded_at.max()
+    train = train[train.tour_id.isin(eligible[eligible < training_cutoff].index)]
+    if train.tour_id.nunique() < 2:
+        raise ValueError('Zu wenige abgeschlossene Trainingstouren vor dem Testzeitraum.')
+    x = lambda frame: pd.DataFrame([features(r.osrm_baseline_s, r.distance_m, r.planned_departure_at.isoformat()) for r in frame.itertuples()], columns=FEATURES)
+    model = RandomForestRegressor(n_estimators=100, min_samples_leaf=2, max_depth=10, random_state=42, n_jobs=1)
+    model.fit(x(train), train.target_s)
+    validation_mae = mean_absolute_error(validation.target_s, model.predict(x(validation))) / 60
+    report = {'model_id': str(uuid.uuid4()), 'features': FEATURES, 'data_origin': str(df.data_origin.iloc[0]),
+              'train_tours': sorted(map(str, train.tour_id.unique())),
+              'validation_tours': sorted(map(str, validation.tour_id.unique())),
+              'validation_mae_min': validation_mae,
+              'test_tours': sorted(map(str, test.tour_id.unique())),
+              'train_rows': len(train), 'validation_rows': len(validation), 'test_rows': len(test),
+              'cutoff': cutoff.isoformat(),
+              'dataset_sha256': hashlib.sha256(df.to_csv(index=False).encode()).hexdigest(),
+              'parameters': model.get_params(),
+              'limitation': 'Feste Modellparameter. Segmentfehler sind keine Bewertung der Ankunftskette.'}
+    # Only reload artifacts generated by this process, never user uploads.
+    with tempfile.TemporaryDirectory() as directory:
+        artifact = Path(directory) / 'forecast.joblib'
+        joblib.dump({'model': model, 'report': report}, artifact)
+        bundle = joblib.load(artifact)
+    report = bundle['report']
+    prediction = bundle['model'].predict(x(test))
+    baseline = test.osrm_baseline_s.to_numpy()
+    scores = []
+    for name, values in [('Planbasis', baseline), ('Random Forest', prediction)]:
+        scores.append({'Verfahren': name, 'MAE_min': mean_absolute_error(test.target_s, values)/60,
+                       'RMSE_min': math.sqrt(mean_squared_error(test.target_s, values))/60,
+                       'Bias_min': float(np.mean(values-test.target_s))/60})
+    report['metrics'] = scores
+    details = test[['tour_id','segment_id']].copy()
+    details['IST_min' if report['data_origin'] == 'real' else 'Synthetische_Zielzeit_min'] = test.target_s/60
+    details['Plan_min'] = baseline/60
+    details['ML_min'] = prediction/60
+    return bundle, pd.DataFrame(scores), details
+
+PIPELINE_FEATURES = ['baseline_s', 'distance_m', 'departure_hour', 'weekday', 'remaining_load_kg']
+
+def load_forecast_model(path):
+    """Load a trusted pipeline artifact; never load untrusted joblib files."""
+    import joblib
+    from pathlib import Path
+    raw = Path(path).read_bytes()
+    bundle = joblib.load(path)
+    if isinstance(bundle, dict) and 'schema_version' not in bundle:
+        report = bundle.get('report', {})
+        if report.get('features') != FEATURES or list(getattr(bundle.get('model'), 'feature_names_in_', [])) != FEATURES:
+            raise ValueError('Incompatible application model features')
+        if report.get('data_origin') not in ('synthetic', 'simulation', 'real'):
+            raise ValueError('Missing model data origin')
+        report['model_id'] = 'app-' + hashlib.sha256(raw).hexdigest()
+        return bundle
+    if not isinstance(bundle, dict) or bundle.get('schema_version') != '1.0.0':
+        raise ValueError('Unsupported pipeline model schema')
+    if bundle.get('features') != PIPELINE_FEATURES or bundle.get('data_origin') != 'synthetic':
+        raise ValueError('Incompatible pipeline feature/origin contract')
+    model = bundle.get('model')
+    if list(getattr(model, 'feature_names_in_', [])) != PIPELINE_FEATURES:
+        raise ValueError('Fitted model features differ from declared schema')
+    bundle['report'] = {'model_id': 'pipeline-' + hashlib.sha256(raw).hexdigest(),
+                        'features': PIPELINE_FEATURES, 'data_origin': 'synthetic'}
+    return bundle
+
+def _raw_predict_seconds(bundle, baseline, distance, departure, remaining_load_kg=None):
+    if bundle.get('schema_version') is not None:
+        if bundle.get('schema_version') != '1.0.0' or bundle.get('features') != PIPELINE_FEATURES:
+            raise ValueError('Incompatible pipeline model schema')
+        values = features(baseline, distance, departure)
+        local = pd.Timestamp(departure).tz_convert('Europe/Berlin')
+        values[2] = local.hour + local.minute/60 + local.second/3600 + local.microsecond/3600000000
+        if remaining_load_kg is None or not math.isfinite(float(remaining_load_kg)) or float(remaining_load_kg) < 0:
+            raise ValueError('Pipeline forecast requires nonnegative remaining load')
+        row = pd.DataFrame([values + [float(remaining_load_kg)]], columns=PIPELINE_FEATURES)
+        result = float(bundle['model'].predict(row)[0])
+        if not math.isfinite(result) or result <= 0:
+            raise ValueError('Model produced invalid travel time')
+        return max(1, int(round(result)))
+
+    row = pd.DataFrame([features(baseline, distance, departure)], columns=FEATURES)
+    result = float(bundle['model'].predict(row)[0])
+    if not math.isfinite(result) or result <= 0:
+        raise ValueError('Model produced invalid travel time')
+    return max(1, int(round(result)))
 
 
-def tour_order(data):
-    return data.groupby('tour_id').departure_time.min().sort_values(kind='stable').index.to_numpy()
 
 
-def purge(data, earlier, later):
-    """All labels of an earlier tour must be available before the later period starts."""
-    cutoff = data.loc[later, 'departure_time'].min()
-    ends = data.groupby('tour_id').actual_arrival.max()
-    allowed = ends[ends < cutoff].index
-    return np.asarray([i for i in earlier if data.loc[i, 'tour_id'] in allowed], dtype=int)
+def guard_prediction(bundle, baseline, distance, prediction):
+    """Reject unsupported extrapolation; never call a reference fallback an ML prediction."""
+    generator = bundle.get('report', {}).get('generator', {})
+    limits = generator.get('distance_m_range')
+    if limits and not float(limits[0]) <= float(distance) <= float(limits[1]):
+        return 'Strecke außerhalb des Modell-Trainingsbereichs.'
+    speed = generator.get('baseline_speed_kmh')
+    if limits and speed:
+        low, high = [float(v) / (float(speed)/3.6) for v in limits]
+        if not low <= float(baseline) <= high:
+            return 'Fahrzeit außerhalb des Modell-Trainingsbereichs.'
+    if float(prediction) < .5 * float(baseline):
+        return 'Modellzeit unplausibel kurz gegenüber OSRM.'
+    return None
 
 
-def split(data):
-    tours = tour_order(data)
-    n = len(tours)
-    a, b = int(n * .7), int(n * .85)
-    parts = [data.index[data.tour_id.isin(ids)].to_numpy() for ids in
-             [tours[:a], tours[a:b], tours[b:]]]
-    parts[0] = purge(data, parts[0], parts[1])
-    parts[1] = purge(data, parts[1], parts[2])
-    if any(len(p) == 0 for p in parts):
-        raise ValueError('Overlapping tours leave an empty temporal partition; collect more history.')
-    return parts
+def predict_details(bundle, baseline, distance, departure, remaining_load_kg=None):
+    raw = _raw_predict_seconds(bundle, baseline, distance, departure, remaining_load_kg)
+    warning = guard_prediction(bundle, baseline, distance, raw)
+    return {'seconds': max(1, int(round(baseline))) if warning else raw,
+            'raw_model_s': raw, 'warning': warning,
+            'source': 'OSRM-Ersatzwert' if warning else 'KI-Modell'}
 
 
-def folds(data):
-    tours = tour_order(data)
-    if len(tours) < 6:
-        raise ValueError('At least six training tours remain necessary after overlap purging.')
-    result = []
-    for a, b in TimeSeriesSplit(n_splits=3).split(tours):
-        train = data.index[data.tour_id.isin(tours[a])].to_numpy()
-        valid = data.index[data.tour_id.isin(tours[b])].to_numpy()
-        train = purge(data, train, valid)
-        if not len(train):
-            raise ValueError('Insufficient non-overlapping history for backtesting.')
-        result.append((train, valid))
-    return result
-
-
-def metrics(actual, predicted):
-    y, p = np.asarray(actual, float), np.maximum(0, np.asarray(predicted, float))
-    error = p - y
-    mask = np.abs(y) >= 1  # avoid undefined or unstable percentages below one second
-    return {'mae_s': float(np.abs(error).mean()), 'rmse_s': float(np.sqrt((error ** 2).mean())),
-            'mape_pct': float((np.abs(error[mask] / y[mask])).mean() * 100) if mask.any() else None,
-            'mape_n': int(mask.sum()), 'n': len(y)}
-
-
-def train(frame):
-    data, rejected = prepare(frame)
-    tr, va, te = split(data)
-    training = data.loc[tr].reset_index(drop=True)
-    cv = folds(training)
-    x, y = features(training), training.actual_travel_s
-    # Statistical extremes are flagged, never deleted: real congestion remains learnable.
-    ratio = y / training.osrm_baseline_s
-    q1, q3 = ratio.quantile([.25, .75])
-    bounds = [float(q1 - 1.5 * (q3-q1)), float(q3 + 1.5 * (q3-q1))]
-    specs = {
-        'ridge': (make_pipeline(StandardScaler(), Ridge()), {'ridge__alpha': [.1, 10, 100]}),
-        'forest': (RandomForestRegressor(n_estimators=80, random_state=42, n_jobs=1),
-                   {'max_depth': [5, None], 'min_samples_leaf': [2, 5]}),
-        # Explicit iteration selection on temporal folds avoids random early-stopping splits.
-        'boosting': (GradientBoostingRegressor(random_state=42, loss='huber'),
-                     {'n_estimators': [50, 100], 'learning_rate': [.03, .1], 'max_depth': [2]}),
-    }
-    candidates, report = {}, {}
-    for name, (model, grid) in specs.items():
-        search = GridSearchCV(model, grid, scoring='neg_mean_absolute_error', cv=cv, n_jobs=1,
-                              error_score='raise').fit(x, y)
-        candidates[name] = search.best_estimator_
-        report[name] = {'parameters': search.best_params_, 'cv_mae_s': float(-search.best_score_),
-                       'backtest_mae_s': [float(-search.cv_results_[f'split{i}_test_score'][search.best_index_])
-                                         for i in range(len(cv))]}
-    candidates['ensemble'] = VotingRegressor([(n, clone(m)) for n, m in candidates.items()]).fit(x, y)
-    report['ensemble'] = {}
-    for name, model in candidates.items():
-        report[name]['validation'] = metrics(data.loc[va, 'actual_travel_s'], model.predict(features(data.loc[va])))
-    # OSRM participates in selection so a worse ML model is not automatically activated.
-    baseline_validation = metrics(data.loc[va, 'actual_travel_s'], data.loc[va, 'osrm_baseline_s'])
-    winner = min(report, key=lambda name: report[name]['validation']['mae_s'])
-    selected = winner if report[winner]['validation']['mae_s'] < baseline_validation['mae_s'] else 'osrm'
-    # Refit only after validation selection; the test set is evaluated once, never used for tuning.
-    fit_idx = np.concatenate([tr, va])
-    model = clone(candidates[winner]).fit(features(data.loc[fit_idx]), data.loc[fit_idx, 'actual_travel_s']) if selected != 'osrm' else None
-    test = data.loc[te]
-    prediction = model.predict(features(test)) if model is not None else test.osrm_baseline_s.to_numpy()
-    data['partition'] = 'purged_overlap'
-    for name, indices in zip(['train', 'validation', 'test'], [tr, va, te]):
-        data.loc[indices, 'partition'] = name
-    data['outlier_flag'] = ~((data.actual_travel_s / data.osrm_baseline_s).between(*bounds))
-    result = {'selected': selected, 'candidates': report, 'baseline_validation': baseline_validation,
-              'test': metrics(test.actual_travel_s, prediction),
-              'baseline_test': metrics(test.actual_travel_s, test.osrm_baseline_s),
-              'split_rows': data.partition.value_counts().to_dict(), 'rejected_rows': len(rejected),
-              'outlier_ratio_bounds_train_only': bounds, 'outlier_rows_retained': int(data.outlier_flag.sum()),
-              'sklearn_version': sklearn.__version__, 'schema_version': SCHEMA_VERSION,
-              'backtesting': '3 expanding tour windows within training; overlapping label intervals purged'}
-    predictions = test[['tour_id', 'segment_id', 'actual_travel_s', 'osrm_baseline_s']].copy()
-    predictions['prediction_s'] = np.maximum(0, prediction)
-    return {'model': model, 'schema_version': SCHEMA_VERSION}, result, data, rejected, predictions
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('csv', type=Path)
-    parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--source', required=True, help='Source, author/version, rights/license and preparation reference')
-    args = parser.parse_args()
-    if args.output.exists():
-        parser.error('Choose a new output directory to preserve previous runs.')
-    bundle, report, assignments, rejected, predictions = train(pd.read_csv(args.csv))
-    report.update(source=args.source, input_sha256=hashlib.sha256(args.csv.read_bytes()).hexdigest())
-    args.output.mkdir(parents=True)
-    joblib.dump(bundle, args.output / 'model.joblib')
-    (args.output / 'report.json').write_text(json.dumps(report, indent=2, allow_nan=False), encoding='utf-8')
-    assignments.to_csv(args.output / 'assignments.csv', index=False)
-    rejected.to_csv(args.output / 'rejected.csv', index=False)
-    predictions.to_csv(args.output / 'test_predictions.csv', index=False)
-    print(json.dumps(report, indent=2))
-
-
-if __name__ == '__main__':
-    main()
+def predict_seconds(bundle, baseline, distance, departure, remaining_load_kg=None):
+    return predict_details(bundle, baseline, distance, departure, remaining_load_kg)['seconds']

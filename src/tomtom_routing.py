@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import os
+import math
+import time
+import threading
+from email.utils import parsedate_to_datetime
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
@@ -29,6 +33,54 @@ REQUEST_TIMEOUT = int(
 TOMTOM_ROUTING_BASE_URL = (
     "https://api.tomtom.com/routing/1/calculateRoute"
 )
+
+
+# Shared by all provider instances/tours in this application process.
+# Multiple replicas using the same key need a shared external limiter.
+_ROUTING_LOCK = threading.Lock()
+_ROUTING_NEXT_REQUEST = 0.0
+_ROUTING_INTERVAL_S = 0.25
+_ROUTING_MAX_ATTEMPTS = 3
+_ROUTING_MAX_WAIT_S = 30.0
+
+
+def _retry_after_seconds(value, fallback):
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        try:
+            seconds = (parsedate_to_datetime(value) - datetime.now(timezone.utc)).total_seconds()
+        except (TypeError, ValueError, OverflowError):
+            return fallback
+    return max(fallback, seconds) if math.isfinite(seconds) else fallback
+
+
+def _routing_get(session, url, params, timeout):
+    """Serialize starts, share cooldowns, and bound transient retries."""
+    global _ROUTING_NEXT_REQUEST
+    for attempt in range(_ROUTING_MAX_ATTEMPTS):
+        with _ROUTING_LOCK:
+            wait = max(0.0, _ROUTING_NEXT_REQUEST - time.monotonic())
+            if wait > _ROUTING_MAX_WAIT_S:
+                raise RuntimeError("TomTom: API-Wartezeit aktiv; bitte später erneut versuchen.")
+            if wait:
+                time.sleep(wait)
+            _ROUTING_NEXT_REQUEST = time.monotonic() + _ROUTING_INTERVAL_S
+            try:
+                response = session.get(url, params=params, timeout=timeout)
+            except (requests.Timeout, requests.ConnectionError):
+                _ROUTING_NEXT_REQUEST = max(_ROUTING_NEXT_REQUEST, time.monotonic() + 2 ** attempt)
+                if attempt == _ROUTING_MAX_ATTEMPTS - 1:
+                    raise
+                continue
+            if response.status_code != 429 and response.status_code < 500:
+                return response
+            delay = _retry_after_seconds(response.headers.get("Retry-After"), 2 ** attempt)
+            _ROUTING_NEXT_REQUEST = max(_ROUTING_NEXT_REQUEST, time.monotonic() + delay)
+            if attempt == _ROUTING_MAX_ATTEMPTS - 1 or delay > _ROUTING_MAX_WAIT_S:
+                return response
+            response.close()
+    return response
 
 
 # ============================================================
@@ -58,6 +110,7 @@ class TomTomSegmentResult:
     traffic_length_m: int
 
     success: bool
+    geometry: Optional[list] = None
 
     error: Optional[str] = None
     raw: Optional[Dict[str, Any]] = None
@@ -442,7 +495,7 @@ class TomTomRoutingProvider:
                 else "false",
 
             "routeRepresentation":
-                "summaryOnly",
+                "polyline",
         }
 
         # ----------------------------------------------------
@@ -506,13 +559,7 @@ class TomTomRoutingProvider:
 
         try:
 
-            response = (
-                self.session.get(
-                    url,
-                    params=params,
-                    timeout=self.timeout
-                )
-            )
+            response = _routing_get(self.session, url, params, self.timeout)
 
             # ------------------------------------------------
             # SPEZIFISCHE API-FEHLER
@@ -646,6 +693,12 @@ class TomTomRoutingProvider:
                 )
             )
 
+            geometry = [
+                (float(point["latitude"]), float(point["longitude"]))
+                for leg in route.get("legs", [])
+                for point in leg.get("points", [])
+            ]
+
             return TomTomSegmentResult(
                 from_lat=
                     origin_lat,
@@ -688,6 +741,8 @@ class TomTomRoutingProvider:
 
                 success=
                     True,
+
+                geometry=geometry,
 
                 error=
                     None,
@@ -742,9 +797,10 @@ class TomTomRoutingProvider:
                     False,
 
                 error=
-                    str(
-                        exc
-                    ),
+                    f"TomTom HTTP {exc.response.status_code}"
+                    if isinstance(exc, requests.HTTPError) and exc.response is not None
+                    else str(exc) if isinstance(exc, RuntimeError)
+                    else type(exc).__name__,
 
                 raw=
                     None

@@ -39,7 +39,7 @@ No Uni Wuppertal data is included or presumed available in this repository.
 
 ```bash
 pip install -r requirements.txt
-python -m src.ml_training measured_segments.csv --output training_runs/run_001 --source "Dataset; author; version; license/permission; preparation reference"
+python -m src.measured_training measured_segments.csv --output training_runs/run_001 --source "Dataset; author; version; license/permission; preparation reference"
 ```
 
 At least 12 valid tours are required (a software minimum, not statistical proof).
@@ -75,7 +75,8 @@ python app.py
 
 Use the same dependency versions as training. Joblib uses pickle: load only your
 own trusted artifacts. A missing/unreadable/incompatible artifact emits a warning
-and falls back to the existing heuristic; without the variable behavior is unchanged.
+and leaves the bundled model active in the app. Without the variable the app uses
+the bundled model by default.
 An artifact selected as `osrm` returns the baseline rather than the heuristic.
 Changing the file reloads it by modification time. The feature transformation is
 shared between training and inference. Validation selection does not guarantee
