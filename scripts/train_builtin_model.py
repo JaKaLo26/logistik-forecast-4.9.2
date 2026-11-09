@@ -8,11 +8,11 @@ from src.synthetic_training import generate_training_data
 from src.ml_training import train_experiment, load_forecast_model, features, FEATURES
 from sklearn.metrics import mean_absolute_error
 ROOT=Path(__file__).resolve().parents[1]
-orders=pd.read_csv(ROOT/'data/training_stops_de.csv',dtype={'plz':str})
+orders=pd.read_csv(ROOT/'data/training_stops_de.csv',dtype={'plz':str,'hausnummer':str})
 frame,generator=generate_training_data(orders,seed=42,tour_count=1000)
 bundle,metrics,details=train_experiment(frame)
 report=bundle['report']
-report.update(generator=generator,script_version='2.0',sklearn_version=sklearn.__version__,
+report.update(generator=generator,script_version='2.1',sklearn_version=sklearn.__version__,
               source='Fully synthetic offline scenario; addresses not geocoded; no external routing data')
 report['state_counts']={state: {'tours': int(frame[frame.bundesland==state].tour_id.nunique()),
                                 'stops': int((frame.bundesland==state).sum())}
