@@ -3,7 +3,7 @@
 Das vortrainierte Modell `models/builtin_forecast.joblib` wird beim App-Start
 geladen. Kein Training, Upload oder manuelles Aktivieren in der Oberfläche.
 Die bisherige vierte Seite entfällt. Training bleibt ein separater Offline-Schritt:
-`python scripts/train_builtin_model.py` (aktuelle Skriptversion 2.0).
+`python scripts/train_builtin_model.py` (aktuelle Skriptversion 2.1).
 
 Seite 2: Depot und Startzeit angeben. Die gerichtete OSRM-Matrix liefert
 Basiszeiten und Distanzen. Das Modell prognostiziert daraus die Fahrzeiten
@@ -37,8 +37,11 @@ Trainingsbasis ist vollständig offline synthetisch: zufällige Segmentdistanzen
 2–25 km und angenommene Basisgeschwindigkeit 45 km/h. Kein Straßen-/LKW-
 Genauigkeitsnachweis und keine belastbare Extrapolation außerhalb dieses
 Szenarios. Der Wuppertal-Datensatz und TomTom werden nicht fürs Training benutzt.
-Die Datei `data/training_stops_de.csv` enthält zehn ungeprüfte Straßenangaben ohne
-Hausnummer je Bundesland. Diese Angaben werden nicht geocodiert. Das Modell sieht
+Die Datei `data/training_stops_de.csv` enthält zehn Teststopps je Bundesland.
+Die Hausnummer `1` dient jeweils als synthetischer, ungeprüfter Platzhalter.
+Der Generator übernimmt Hausnummern aus einer eigenen Spalte oder aus vorhandenen
+Straßenangaben und schreibt die vollständige Zieladresse in die Segment-CSV.
+Diese Angaben werden nicht geocodiert. Das Modell sieht
 keine Region als Feature; die Segmentdistanz wird unabhängig vom Ort gezogen.
 Die gleichmäßige Verteilung und der separate Test mit zwei ungesehenen Bundesländern
 belegen daher keine deutschlandweite Genauigkeit auf realen Straßen. Der Bericht
