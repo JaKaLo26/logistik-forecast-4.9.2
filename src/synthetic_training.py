@@ -1,10 +1,32 @@
 """Deterministic offline fixtures from existing tour order CSVs."""
 from datetime import datetime, timedelta, timezone
+import re
 
 import numpy as np
 import pandas as pd
 
-VERSION = '2.0'
+VERSION = '2.1'
+HOUSE_NUMBER = r'[1-9][0-9]*[a-zA-Z]?(?:[-/][1-9][0-9]*[a-zA-Z]?)?'
+
+
+def training_address(street, house_number=''):
+    street = str(street).strip()
+    if isinstance(house_number, float) and house_number.is_integer():
+        house_number = int(house_number)
+    number = '' if pd.isna(house_number) else str(house_number).strip()
+    if number and not re.fullmatch(HOUSE_NUMBER, number):
+        raise ValueError(f'Ungültige Hausnummer: {number}')
+    prefix = re.fullmatch(rf'({HOUSE_NUMBER})\s+(.+)', street)
+    suffix = re.fullmatch(rf'(.+?)\s+({HOUSE_NUMBER})', street)
+    if suffix:
+        street, embedded = suffix.groups()
+    elif prefix:
+        embedded, street = prefix.groups()
+    else:
+        return street, number
+    if number and number.casefold() != embedded.casefold():
+        raise ValueError(f'Widersprüchliche Hausnummern: {embedded} und {number}')
+    return street, number or embedded
 
 
 def generate_training_data(orders, *, seed=42, tour_count=30):
@@ -20,6 +42,11 @@ def generate_training_data(orders, *, seed=42, tour_count=30):
         raise ValueError('Servicezeiten müssen endlich und nicht negativ sein.')
     if not 5 <= tour_count <= 5000:
         raise ValueError('Bitte zwischen 5 und 5000 Touren wählen.')
+
+    orders = orders.copy()
+    addresses = [training_address(row.strasse, getattr(row, 'hausnummer', ''))
+                 for row in orders.itertuples(index=False)]
+    orders['strasse'], orders['hausnummer'] = zip(*addresses)
 
     balanced_states = 'bundesland' in orders.columns
     if balanced_states:
@@ -78,7 +105,10 @@ def generate_training_data(orders, *, seed=42, tour_count=30):
                 osrm_baseline_s=baseline, distance_m=distance, data_origin='synthetic',
                 source_order=str(order.auftrag),
                 bundesland=str(order.bundesland) if balanced_states else '',
-                address_status='ungeprüfte Straßenangabe ohne Hausnummer' if balanced_states else '',
+                hausnummer=order.hausnummer,
+                zieladresse=f'{order.strasse} {order.hausnummer}'.strip() + f', {order.plz} {order.ort}',
+                address_status=('synthetische Adressangabe mit ungeprüfter Hausnummer'
+                                if order.hausnummer else 'ungeprüfte Straßenangabe ohne Hausnummer'),
             ))
             service = timedelta(minutes=float(order.service_min))
             planned += timedelta(seconds=baseline) + service
@@ -89,5 +119,6 @@ def generate_training_data(orders, *, seed=42, tour_count=30):
         'baseline_speed_kmh': 45, 'peak_local_hours': [6, 7, 8, 14, 15, 16],
         'peak_multiplier': 1.25, 'off_peak_multiplier': 1.05, 'noise_std_s': 45,
         'regional_distribution': '16 states, 500 stops each' if balanced_states and tour_count == 1000 else None,
+        'address_scope': 'Unverified destination address metadata; not a model feature',
         'routing_source': 'none; independent random distances, no geocoding or OSRM',
     }
